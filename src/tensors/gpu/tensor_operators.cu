@@ -3249,7 +3249,6 @@ void AddFactorMaxes(Tensor out,
                                                       sizeWithoutInnerDim,
                                                       groupStart, lemmaHasFactorGroupTensor->shape()[1], numLemmas,
                                                       std::numeric_limits<float>::lowest());
-    CUDA_CHECK(cudaStreamSynchronize(0));
     allocator->free(mp_ptrs);
   #if COMPILE_FP16
   } else if(out->type() == Type::float16) {
@@ -3274,7 +3273,6 @@ void AddFactorMaxes(Tensor out,
                                                       sizeWithoutInnerDim,
                                                       groupStart, lemmaHasFactorGroupTensor->shape()[1], numLemmas,
                                                       __float2half(std::numeric_limits<float>::lowest()) );
-    CUDA_CHECK(cudaStreamSynchronize(0));
     allocator->free(mp_ptrs);
   #endif
   } else {
