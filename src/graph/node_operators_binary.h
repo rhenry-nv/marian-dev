@@ -1,4 +1,4 @@
-/* All or part of this file was contributed by NVIDIA under license:
+/* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
@@ -1483,6 +1483,70 @@ public:
 private:
   friend class SerializationHelpers; // @TODO: use the same name for this as SqrtNodeOp
 };
+
+struct BatchRowCopyOp : public NaryNodeOp {
+
+public:
+  BatchRowCopyOp(const std::vector<Expr>& tensors, Expr rows)
+      : NaryNodeOp(join(tensors, rows), getShape(tensors, rows), commonType(tensors) ) {
+        ABORT_IF(rows->shape().size() != 1, "List of rows must be 1D");
+      }
+
+  Shape getShape(const std::vector<Expr>& tensors, const Expr& indices) {
+    int totalElts = 0;
+    int numRows = indices->shape().elements();
+    for(int i = 0; i < tensors.size(); ++i) {
+      ABORT_IF(tensors[i]->shape().size() != 2, "Tensor {} must be a matrix but has {} dims", i, tensors[i]->shape().size());
+      int colsInTensor = tensors[i]->shape()[1];
+      int eltsFromTensor = numRows * colsInTensor;
+      totalElts += eltsFromTensor;
+    }
+    return Shape({totalElts});
+  }
+
+  std::vector<Expr> join(const std::vector<Expr> tensors, const Expr& row) {
+    std::vector<Expr> joined;
+    joined.insert(joined.end(), tensors.begin(), tensors.end());
+    joined.push_back(row);
+    return joined;
+  }
+
+  NodeOps forwardOps() override {
+    std::vector<Tensor> tensors(children_.size() - 1);
+    std::transform(children_.begin(), children_.end() - 1, tensors.begin(), [](Expr e) {return e->val();});
+    Tensor indices = children_[children_.size() - 1]->val();
+    return {NodeOp(
+                    BatchRowCopy(val_,
+                                 graph()->allocator(), 
+                                 tensors, // Input tensors
+                                 indices)
+    )};
+  }
+
+  NodeOps backwardOps() override {
+    ABORT("Not Implemented for Training");
+  }
+
+  const std::string type() override { return "BatchRowCopyOp"; }
+
+  virtual size_t hash() override {
+    size_t seed = NaryNodeOp::hash();
+    return seed;
+  }
+
+  virtual bool equal(Expr node) override {
+    if(!NaryNodeOp::equal(node))
+      return false;
+    auto cnode = std::dynamic_pointer_cast<BatchRowCopyOp>(node);
+    if(!cnode)
+      return false;
+    return true;
+  }
+
+private:
+  friend class SerializationHelpers; // @TODO: use the same name for this as SqrtNodeOp
+};
+
 
 struct HighwayNodeOp : public NaryNodeOp {
   HighwayNodeOp(const std::vector<Expr>& nodes) : NaryNodeOp(nodes) {}

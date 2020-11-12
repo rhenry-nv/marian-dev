@@ -3,7 +3,7 @@
  *   SPDX-License-Identifier: MIT
  */
  
-/* All or part of this file was contributed by NVIDIA under license:
+/* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
@@ -46,7 +46,14 @@ void AddFactorMaxes(Tensor /*out*/,
                     const std::vector<marian::Tensor>& /*groupLosses*/,
                     size_t /*groupStart*/,
                     size_t /*numLemmas*/) {
-  ABORT("AddFactorMaxes not implemented on CPU");
+  ABORT("Not implemented");
+}
+
+void BatchRowCopy(Tensor /*out*/,
+                  Ptr<Allocator> /*allocator*/,
+                  const std::vector<marian::Tensor>& /*tensors*/,
+                  const marian::Tensor& /*rows*/) {
+  ABORT("Not implemented");
 }
 
 template <typename To, typename From>

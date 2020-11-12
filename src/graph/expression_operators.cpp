@@ -1,4 +1,4 @@
-/* All or part of this file was contributed by NVIDIA under license:
+/* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
@@ -726,6 +726,65 @@ Expr addFactorMaxes(Expr lemmaHasFactorGroup, std::vector<Expr> groupLosses, Exp
   nodes.insert(nodes.end(), groupLosses.begin(), groupLosses.end());
   bool hasShortList = hypIndices != nullptr;
   return Expression<AddFactorMaxesOp>(nodes, hasShortList, groupStart, numLemmas);
+}
+
+// Selects the rows from the input tensors in exprs. 
+// Result[i] corresponds to the rows selected for exprs[i] and is actually slices from a bigger tensor with all rows
+// This function ignores null pointers. That is, if exprs[i] = null, result[i] will also be null.
+//
+// This OP can optimize during inference on GPU. 
+std::vector<Expr> batchedRowCopy(const std::vector<Expr>& exprs, Expr rowIndices) {
+  Ptr<ExpressionGraph> g;
+  for(const auto& e: exprs) {
+    if(e) {
+      g = e->graph();
+      break;
+    }
+  }
+
+  // If no graph, all tensors were null so nothing to return.
+  if(!g) return std::vector<Expr>(exprs.size());
+
+  // During training or on CPU, just run a loop and call marian::rows separately.
+  if(!g->isInference() || g->getBackend()->getDeviceId().type == DeviceType::cpu) {
+    std::vector<Expr> result;
+    for(size_t i = 0; i < exprs.size(); ++i) {
+      Expr e;
+      if(exprs[i]) {
+        e = marian::rows(exprs[i], rowIndices);
+      }
+      result.push_back(e);
+    }
+    return result;
+  }
+
+  // During inference, we batch the work to copy into one kernel call and slice the result.
+  std::vector<size_t> nonNullIndices;
+  std::vector<Expr> nonNullExprs;
+  size_t expectedElts = 0;
+  int numRows = rowIndices->shape().elements();
+
+  for(size_t i = 0; i < exprs.size(); ++i) {
+    if(exprs[i]) {
+      nonNullIndices.push_back(i);
+      nonNullExprs.push_back(exprs[i]);
+      expectedElts += numRows * exprs[i]->shape()[1];
+    }
+  }
+
+  Expr result = Expression<BatchRowCopyOp>(nonNullExprs, rowIndices);
+
+  std::vector<Expr> results(exprs.size());
+  for(size_t i = 0, start = 0; i < nonNullExprs.size(); ++i) {
+    int numCols = nonNullExprs[i]->shape()[1];
+    size_t offset = numRows * numCols;
+    Slice slice(start, start + offset);
+    Expr view = sliceView(result, 0, slice);
+    results[nonNullIndices[i]] = reshape(view, {numRows, numCols});
+    start += offset;
+  }
+
+  return results;
 }
 
 

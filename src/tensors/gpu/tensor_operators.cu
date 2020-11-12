@@ -1,4 +1,4 @@
-/* All or part of this file was contributed by NVIDIA under license:
+/* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
@@ -3277,6 +3277,87 @@ void AddFactorMaxes(Tensor out,
   #endif
   } else {
     ABORT("AddFactorMaxes not implemented for type {}", out->type());
+  }
+}
+
+template<typename T>
+struct ptrOffsetAndColSize {
+  T* ptr; 
+  size_t offset;
+  int cols;
+};
+
+template<typename T>
+__global__ void gBatchRowCopy(T* output, ptrOffsetAndColSize<T>* inputs, IndexType* indices, int numRows) {
+  int tensorForBlock = blockIdx.x / numRows;
+  ptrOffsetAndColSize<T> tensorData = inputs[tensorForBlock];
+  T* sourceTensor = tensorData.ptr;
+  size_t outputOffset = tensorData.offset;
+  int colsInSourceTensor = tensorData.cols;
+
+  int rowIdxForBlock = blockIdx.x % numRows;
+  IndexType rowToCopy = indices[rowIdxForBlock];
+  T* rowOutputPtrForBlock = output + outputOffset + rowIdxForBlock * colsInSourceTensor;
+  T* rowInputForBlock = sourceTensor + rowToCopy * colsInSourceTensor;
+
+  for(int col = threadIdx.x; col < colsInSourceTensor; col += blockDim.x) {
+    rowOutputPtrForBlock[col] = rowInputForBlock[col];
+  }
+
+}
+
+template<typename T>
+MemoryPiece::PtrType copyInputToGPU(const std::vector<Tensor>& tensors, Ptr<Allocator> allocator, int numRows) {
+  std::vector<ptrOffsetAndColSize<T>> inpData;
+  size_t currentOffset = 0;
+
+  for(const auto& tensor : tensors) {
+    int cols = tensor->shape()[1];
+    int elts = numRows * cols;
+    inpData.push_back({tensor->data<T>(), currentOffset, cols});
+    currentOffset += elts;
+  }
+
+  auto gpuMem = allocator->alloc(tensors.size() * sizeof(ptrOffsetAndColSize<T>));
+  ptrOffsetAndColSize<T>* dest = gpuMem->data<ptrOffsetAndColSize<T>>();
+  cudaMemcpyAsync(dest, inpData.data(), inpData.size() * sizeof(ptrOffsetAndColSize<T>), cudaMemcpyHostToDevice, cudaStreamPerThread);
+  return gpuMem;
+}
+
+void BatchRowCopy(Tensor out,
+                  Ptr<Allocator> allocator,
+                  const std::vector<marian::Tensor>& tensors,
+                  const marian::Tensor& indices) {
+
+  cudaSetDevice(out->getDeviceId().no);
+  int numRows = indices->shape().elements();
+  int numBlocks = numRows * tensors.size();
+
+  matchOrAbort<IndexType>(indices->type());
+
+  int numThreads = 0;
+  for(const auto& tensor : tensors) {
+    numThreads = std::max(numThreads, tensor->shape()[1]);
+  }
+
+  if(out->type() == Type::float32) {
+    auto mp = copyInputToGPU<float>(tensors, allocator, numRows);
+    gBatchRowCopy<<<numBlocks, numThreads>>>(out->data<float>(), 
+                                             mp->data<ptrOffsetAndColSize<float>>(), 
+                                             indices->data<IndexType>(), 
+                                             numRows);
+    allocator->free(mp);
+  #if COMPILE_FP16
+  } else if(out->type() == Type::float16) {
+    auto mp = copyInputToGPU<half>(tensors, allocator, numRows);
+    gBatchRowCopy<<<numBlocks, numThreads>>>(out->data<half>(), 
+                                             mp->data<ptrOffsetAndColSize<half>>(), 
+                                             indices->data<IndexType>(), 
+                                             numRows);
+    allocator->free(mp);
+  #endif
+  } else {
+    ABORT("BatchRowCopy not implemented for type {}", out->type());
   }
 }
 

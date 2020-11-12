@@ -1,4 +1,4 @@
-/* All or part of this file was contributed by NVIDIA under license:
+/* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
@@ -10,6 +10,7 @@
 #include "marian.h"
 
 #include <iostream>
+#include <iterator>
 #include <vector>
 
 namespace marian {
@@ -33,24 +34,45 @@ struct State {
     if (!sel)
       return sel; // keep nullptr untouched
 
-    sel = atleast_4d(sel);
     int dimBatch =(int) selIdx->shape().elements()/beamSize;
+    // @TODO: Can this complex operation be more easily written using index_select()?
+    auto selAndShape = reshapeAndGetNewShape(sel, dimBatch, beamSize, isBatchMajor);
+    sel = rows(selAndShape.first, selIdx);
+    sel = reshape(sel, selAndShape.second);
+    return sel;
+  }
+
+  static std::pair<Expr, Shape> reshapeAndGetNewShape(Expr sel, int dimBatch, int beamSize, bool isBatchMajor) {
+    if(!sel)
+      return {sel, Shape()};
+    
+    sel = atleast_4d(sel);
     int dimDepth = sel->shape()[-1];
     int dimTime  = isBatchMajor ? sel->shape()[-2] : sel->shape()[-3];
 
     ABORT_IF(dimTime != 1 && !isBatchMajor, "unexpected time extent for RNN state"); // (the reshape()/rows() trick won't work in this case)
     int numCols = isBatchMajor ? dimDepth * dimTime : dimDepth;
-    // @TODO: Can this complex operation be more easily written using index_select()?
     sel = reshape(sel, { sel->shape().elements() / numCols, numCols }); // [beamSize * dimBatch, dimDepth] or [beamSize * dimBatch, dimTime * dimDepth]
-    sel = rows(sel, selIdx);
-    sel = reshape(sel, { beamSize, isBatchMajor ? dimBatch : dimTime, isBatchMajor ? dimTime : dimBatch, dimDepth });
-    return sel;
+    Shape shape({ beamSize, isBatchMajor ? dimBatch : dimTime, isBatchMajor ? dimTime : dimBatch, dimDepth });
+    return {sel, shape};
   }
 };
 
 class States {
 private:
   std::vector<State> states_;
+
+  std::pair<std::vector<Expr>, std::vector<Shape>> reshapeAndGetNewShapes(int dimBatch, int beamSize, bool isBatchMajor) const {
+    std::vector<Expr> sels;
+    std::vector<Shape> shapes;
+    for(const auto& state : states_) {
+      auto outputData = State::reshapeAndGetNewShape(state.output, dimBatch, beamSize, isBatchMajor);
+      auto cellData = State::reshapeAndGetNewShape(state.cell, dimBatch, beamSize, isBatchMajor);
+      sels.insert(sels.end(), {outputData.first, cellData.first});
+      shapes.insert(shapes.end(), {outputData.second, cellData.second});
+    }
+    return {sels, shapes};
+  }
 
 public:
   States() {}
@@ -91,7 +113,6 @@ public:
     States selected;
     Expr indices;
     // I think this doesn't work if model split among gpus but not sure if it matters
-    
     for (auto& state : states_) {
       if (state.cell) {
         indices = state.cell->graph()->indices(selIdx);
@@ -104,9 +125,19 @@ public:
       }
     }
     
-    // GPU OPT: Implement kernel to batch these on GPU
-    for(auto& state : states_)
-      selected.push_back(state.select(indices, beamSize, isBatchMajor));
+    int dimBatch = (int)selIdx.size()/beamSize;
+    auto reshapeData = reshapeAndGetNewShapes(dimBatch, beamSize, isBatchMajor);
+    std::vector<Expr> slices = batchedRowCopy(reshapeData.first, indices);
+    for(int i = 0; i < slices.size(); i+=2) {
+      if(slices[i]) 
+        slices[i] = reshape(slices[i], reshapeData.second[i]);
+
+      if(slices[i+1]) 
+        slices[i+1] = reshape(slices[i+1], reshapeData.second[i+1]);
+
+      selected.push_back({slices[i], slices[i + 1]});
+    }
+
     return selected;
   }
 
