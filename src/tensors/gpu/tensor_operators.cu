@@ -3312,7 +3312,7 @@ MemoryPiece::PtrType copyInputToGPU(const std::vector<Tensor>& tensors, Ptr<Allo
   size_t currentOffset = 0;
 
   for(const auto& tensor : tensors) {
-    int cols = tensor->shape()[1];
+    int cols = tensor->shape().back();
     int elts = numRows * cols;
     inpData.push_back({tensor->data<T>(), currentOffset, cols});
     currentOffset += elts;
@@ -3337,8 +3337,9 @@ void BatchRowCopy(Tensor out,
 
   int numThreads = 0;
   for(const auto& tensor : tensors) {
-    numThreads = std::max(numThreads, tensor->shape()[1]);
+    numThreads = std::max(numThreads, tensor->shape().back());
   }
+  numThreads = std::min(numThreads, MAX_THREADS);
 
   if(out->type() == Type::float32) {
     auto mp = copyInputToGPU<float>(tensors, allocator, numRows);

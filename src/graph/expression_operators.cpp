@@ -743,16 +743,13 @@ std::vector<Expr> batchedRowCopy(const std::vector<Expr>& exprs, Expr rowIndices
   }
 
   // If no graph, all tensors were null so nothing to return.
-  if(!g) return std::vector<Expr>(exprs.size());
+  if(!g) return exprs;
 
   // During training or on CPU, just run a loop and call marian::rows separately.
   if(!g->isInference() || g->getBackend()->getDeviceId().type == DeviceType::cpu) {
     std::vector<Expr> result;
-    for(size_t i = 0; i < exprs.size(); ++i) {
-      Expr e;
-      if(exprs[i]) {
-        e = marian::rows(exprs[i], rowIndices);
-      }
+    for(auto e : exprs) {
+      if(e) e = marian::rows(e, rowIndices);
       result.push_back(e);
     }
     return result;
@@ -774,7 +771,7 @@ std::vector<Expr> batchedRowCopy(const std::vector<Expr>& exprs, Expr rowIndices
 
   Expr result = Expression<BatchRowCopyOp>(nonNullExprs, rowIndices);
 
-  std::vector<Expr> results(exprs.size());
+  std::vector<Expr> results(exprs.begin(), exprs.end());
   for(size_t i = 0, start = 0; i < nonNullExprs.size(); ++i) {
     int numCols = nonNullExprs[i]->shape()[1];
     size_t offset = numRows * numCols;
