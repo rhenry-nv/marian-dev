@@ -267,6 +267,14 @@ CorpusBase::batch_ptr Corpus::toBatch(const std::vector<Sample>& batchVector) {
     sentenceIds.push_back(ex.getId());
   }
 
+  // When running on GPU, we want the batchWidth to be a multiple of 8 for better tensorcore usage
+  if(options_->get<int>("cpu-threads") == 0) {
+    constexpr int roundingFactor = 8;
+    for(size_t j = 0; j < maxDims.size(); ++j) {
+      maxDims[j] = roundingFactor * ((maxDims[j] + roundingFactor - 1) / roundingFactor);
+    }
+  }
+
   std::vector<Ptr<SubBatch>> subBatches;
   for(size_t j = 0; j < maxDims.size(); ++j) {
     subBatches.emplace_back(New<SubBatch>(batchSize, maxDims[j], vocabs_[j]));
