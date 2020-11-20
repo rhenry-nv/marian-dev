@@ -309,6 +309,12 @@ cublasStatus_t cublasGemmBatchedStridedTyped(cublasHandle_t handle,
 }
 
 #if COMPILE_FP16 // should not be visible for CUDA 9.0 and below
+// In CUDA 11, there is a high start up cost for applying heuristics for small gemms.
+// Therefore, we perform a quick check for small batch and select an algo for cublas.
+static cublasGemmAlgo_t getStridedGemmAlgoFromCache(cublasHandle_t handle) {
+  cublasGemmAlgo_t algo = tensorOpsEnabled(handle) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
+  return algo;
+}
 cublasStatus_t cublasGemmBatchedStridedTyped(cublasHandle_t handle,
                                              CudaCompute computeCapability,
                                              cublasOperation_t transa, 
@@ -322,13 +328,13 @@ cublasStatus_t cublasGemmBatchedStridedTyped(cublasHandle_t handle,
                                              int batchCount) {
   ABORT_IF(computeCapability.major < 6, "Compute capability {} below 6 should not happen for FP16", computeCapability.major);
   // query math mode and set algorithm accordingly
-  auto algorithm = tensorOpsEnabled(handle) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
+  // auto algorithm = tensorOpsEnabled(handle) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
   return cublasGemmStridedBatchedEx(handle, transa, transb, 
                                     m, n, k, alpha, 
                                     (void const*)A, CUDA_R_16F, lda, strideA,
                                     (void const*)B, CUDA_R_16F, ldb, strideB, beta,
                                     (void*)C, CUDA_R_16F, ldc, strideC, batchCount,
-                                    CUDA_R_16F, algorithm);
+                                    CUDA_R_16F, CUBLAS_GEMM_ALGO5_TENSOR_OP);
 }
 #endif
 
