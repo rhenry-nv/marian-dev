@@ -309,6 +309,40 @@ cublasStatus_t cublasGemmBatchedStridedTyped(cublasHandle_t handle,
 }
 
 #if COMPILE_FP16 // should not be visible for CUDA 9.0 and below
+
+// Used since cublas calls for stridedGemms spend more time in the heuristics than
+// executing the gemm for small batch. To hide this, we specify the algo once certain
+// conditions are met. A subsequent release of cublas should fix this so we add support for
+// Turing and volta strided gemms only. The issue is prevalent when using fp16 so only the fp16
+// functions explicitly use algos here. Ampere does not use the algo flag so no support here.
+static cublasGemmAlgo_t stridedBatchedAlgoCache(cublasHandle_t handle,
+                                                CudaCompute computeCapability,
+                                                cublasOperation_t transb,
+                                                int m, int n, int k,                                          
+                                                const half *A, int lda,
+                                                const half *B, int ldb,
+                                                half *C, int ldc,
+                                                int batchCount) {
+  auto algorithm = tensorOpsEnabled(handle) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
+#if CUDA_VERSION >= 11000
+  // Early exit if not turing or volta or tensorOps not requested.
+  if(computeCapability.major != 7 || !tensorOpsEnabled(handle) || batchCount > 1024 ||
+     m > 128 || k > 128 || n > 1) {
+    return algorithm;
+  }
+  
+  // Checks to see if parameters allow for cublas tensor op algos. If this check fails, cublas falls
+  // back to cutlass for tensorop use.
+  // From benching, for small batched gemms on volta, we want tensorOp algo 0 on turing, we want tensorOp algo 5.
+  if(m % 8 == 0 && k % 8 == 0 && (transb == CUBLAS_OP_N || n % 8 == 0) && 
+     intptr_t(A) % 16 == 0 && intptr_t(B) % 16 == 0 && intptr_t(C) % 16 == 0 &&
+     intptr_t(A+lda) % 16 == 0 && intptr_t(B+ldb) % 16 == 0 && intptr_t(C+ldc) % 16 == 0) {
+    return computeCapability.minor == 0? CUBLAS_GEMM_ALGO0_TENSOR_OP : CUBLAS_GEMM_ALGO5_TENSOR_OP;
+  }
+#endif
+  return algorithm;  
+}
+
 cublasStatus_t cublasGemmBatchedStridedTyped(cublasHandle_t handle,
                                              CudaCompute computeCapability,
                                              cublasOperation_t transa, 
@@ -322,7 +356,7 @@ cublasStatus_t cublasGemmBatchedStridedTyped(cublasHandle_t handle,
                                              int batchCount) {
   ABORT_IF(computeCapability.major < 6, "Compute capability {} below 6 should not happen for FP16", computeCapability.major);
   // query math mode and set algorithm accordingly
-  auto algorithm = tensorOpsEnabled(handle) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
+  auto algorithm = stridedBatchedAlgoCache(handle, computeCapability, transb, m, n, k, A, lda, B, ldb, C, ldc, batchCount);
   return cublasGemmStridedBatchedEx(handle, transa, transb, 
                                     m, n, k, alpha, 
                                     (void const*)A, CUDA_R_16F, lda, strideA,
