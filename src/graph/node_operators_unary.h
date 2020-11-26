@@ -495,6 +495,9 @@ struct ReduceNodeOp : public UnaryNodeOp {
     case ReduceNodeOpCode::min:
       return {NodeOp(Reduce(_1, min(_1,_2), std::numeric_limits<float>::max(), val_, child(0)->val()))};
     case ReduceNodeOpCode::max:
+      if(axis_ == child(0)->shape().size() - 1) {
+        return {NodeOp(ReduceMaxLastAxis(val_, child(0)->val()))};
+      }
       return {NodeOp(Reduce(_1, max(_1,_2), std::numeric_limits<float>::lowest(), val_, child(0)->val()))};
     case ReduceNodeOpCode::prod:
       return {NodeOp(Reduce(_1, _1 * _2, 1.0f, val_, child(0)->val()))};

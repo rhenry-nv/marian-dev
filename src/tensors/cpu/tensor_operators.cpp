@@ -56,6 +56,11 @@ void BatchRowCopy(Tensor /*out*/,
   ABORT("Not implemented");
 }
 
+void ReduceMaxLastAxis(Tensor /*out*/,
+                       const marian::Tensor& /*input*/) {
+  ABORT("Not implemented");
+}
+
 template <typename To, typename From>
 void CopyCastTo(To* out, const From* in, int length) {
   for(int i = 0; i < length; ++i)

@@ -111,6 +111,7 @@ DISPATCH9(CSRProd, marian::Tensor, Ptr<Allocator>, const marian::Tensor&, const 
 
 DISPATCH10(Affine, marian::Tensor, Ptr<Allocator>, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, bool, bool, float, float, bool)
 
+DISPATCH2(ReduceMaxLastAxis, marian::Tensor, const marian::Tensor&)
 DISPATCH2(Softmax, marian::Tensor, marian::Tensor)
 DISPATCH3(SoftmaxGrad, marian::Tensor, marian::Tensor, marian::Tensor)
 
