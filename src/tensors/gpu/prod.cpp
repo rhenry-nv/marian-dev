@@ -325,7 +325,7 @@ static cublasGemmAlgo_t stridedBatchedAlgoCache(cublasHandle_t handle,
                                                 int batchCount) {
   auto algorithm = tensorOpsEnabled(handle) ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT;
 #if CUDA_VERSION >= 11000
-  // Early exit if not turing or volta or tensorOps not requested.
+  // Early exit if not turing/volta or tensorOps not requested or params out of benched range.
   if(computeCapability.major != 7 || !tensorOpsEnabled(handle) || batchCount > 1024 ||
      m > 128 || k > 128 || n > 1) {
     return algorithm;
@@ -561,7 +561,6 @@ cusparseStatus_t static cusparseSpMMTyped(cusparseHandle_t handle,
   cusparseDestroySpMat(matA);
   cusparseDestroyDnMat(matB);
   cusparseDestroyDnMat(matC);
-  cudaStreamSynchronize(cudaStreamPerThread);                           
   allocator->free(buffer);
 
   return status;
