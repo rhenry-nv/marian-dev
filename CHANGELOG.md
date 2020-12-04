@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+
 - Includes cub as a dependency
 - Replaces the topK implementation in nth_element.cu and topk.cu
 - Uses the per thread default stream for cublas
