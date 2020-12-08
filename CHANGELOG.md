@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- Adds a fast path to perform a max reduction along the last axis to reduce the H2D communication.
+- Refactors the beam search to batch processing of secondary factors for factored vocabulary models.
 - Batches retrieval of logits from the GPU when the --n-best flag is specified.
 - Includes cub as a dependency
 - Replaces the topK implementation in nth_element.cu and topk.cu
