@@ -1,9 +1,9 @@
- 
 /* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
 
+#include "graph/node_initializers.h"
 #include "marian.h"
 
 #include "layers/generic.h"
@@ -71,6 +71,37 @@ namespace marian {
   //  ABORT_IF(!logits_.front()->count(), "getRationalLoss() used on rational loss without count");
   //  return logits_.front();
   //}
+
+  std::vector<Expr> Logits::getSecondaryFactorLogits(std::vector<size_t> factorGroups, 
+                                                     const std::vector<IndexType>& hypIndices, 
+                                                     size_t batchSize, size_t beamSize,
+                                                     const std::vector<Expr>& expandedPathScores, 
+                                                     float scorerWeight) const {
+    const int totalElts = batchSize * beamSize;
+    std::vector<Expr> updatedPathScores(factorGroups.size());
+    auto indices = graph()->indices(hypIndices);
+
+    for(int fgIndex = 0; fgIndex < (int)factorGroups.size(); ++fgIndex) {
+      int factorGroup = factorGroups[fgIndex];
+      ABORT_IF(factorGroup == 0, "Lemmas not supported");
+
+      // Find and subtract max from factor scores
+      auto sel = logits_[factorGroup]->loss(); // [localBeamSize, 1, dimBatch, dimFactorVocab]
+      sel = sel - max(sel, -1);
+      
+      // Obtain slice for indices
+      int start = totalElts * fgIndex;
+      int end = totalElts * (fgIndex + 1);
+      Slice fgSlice(start, end, 1);
+      Expr fgIndices = slice(indices, 0, fgSlice);
+
+      // Select relevant scores
+      Expr logProbs = rnn::State::select(sel, fgIndices, (int)beamSize, /*isBatchMajor=*/false);
+      updatedPathScores[fgIndex] = expandedPathScores[fgIndex] + scorerWeight * logProbs;
+    }
+
+    return updatedPathScores;
+  }
 
   // get logits for one factor group
   // For groupIndex == 0, the function also requires the shortlist if there is one.
