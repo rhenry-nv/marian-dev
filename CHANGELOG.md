@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- Adds custom bias epilogue kernel.
+- Adds support for fusing relu and bias addition into gemms when using cuda 11.
 - Changes the invalid path score in the beam search to be negative infinity instead of the lowest float. The beam search did not work with fp16 for factored vocab models due to float min being cast to fp16.
 - Adds spmm fp16 support for CUDA 11
 - Add new operator to compute path score for lemmas for a factored vocabulary
