@@ -3,6 +3,8 @@
  *   SPDX-License-Identifier: MIT
  */
  
+
+#include "common/types.h"
 #ifdef _MSC_VER
 #pragma warning(disable: 4505) // warning C4505: '__float2half_rz': unreferenced local function has been removed (missing 'static inline')
 #endif
@@ -15,6 +17,10 @@
 #include "tensors/gpu/backend.h"
 #include "tensors/gpu/cuda_helpers.h"
 // clang-format on
+
+#if CUDA_VERSION >= 11000
+#include <cublasLt.h>
+#endif
 
 namespace marian {
 
@@ -461,6 +467,100 @@ static cusparseSgemmiEx(cusparseHandle_t handle, int m,
   return CUSPARSE_STATUS_SUCCESS;
 }
 
+// Computes C = A x B for row-major matrices where C is dense, A is sparse and B is dense
+#if CUDA_VERSION >= 11000
+cusparseStatus_t static cusparseSpMMTyped(cusparseHandle_t handle,
+                                          Ptr<Allocator> allocator,
+                                          bool transA, bool transB,
+                                          int m, int n, 
+                                          int k, int nnz,
+                                          const float* alpha,
+                                          const float* csrValA,
+                                          const int* csrRowPtrA,
+                                          const int* csrColIndA,
+                                          const float* B,
+                                          int ldb,
+                                          const float* beta,
+                                          float* C,
+                                          int ldc) 
+{
+  cusparseOperation_t opA = transA? CUSPARSE_OPERATION_TRANSPOSE : CUSPARSE_OPERATION_NON_TRANSPOSE;
+  cusparseOperation_t opB = transB? CUSPARSE_OPERATION_TRANSPOSE : CUSPARSE_OPERATION_NON_TRANSPOSE;
+
+  cusparseSpMatDescr_t matA;
+  CUSPARSE_CHECK(cusparseCreateCsr(&matA, m, k, nnz, (void*)csrRowPtrA, (void*)csrColIndA, (void*)csrValA, 
+                                   CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
+  
+  cusparseDnMatDescr_t matB;
+  CUSPARSE_CHECK(cusparseCreateDnMat(&matB, k, n, ldb, (void*)B, CUDA_R_32F, CUSPARSE_ORDER_ROW));
+
+  cusparseDnMatDescr_t matC;
+  CUSPARSE_CHECK(cusparseCreateDnMat(&matC, m, n, ldc, (void*)C , CUDA_R_32F, CUSPARSE_ORDER_ROW));
+
+  cusparseSpMMAlg_t alg = CUSPARSE_SPMM_ALG_DEFAULT;
+
+  size_t bufferSize = 0;
+  CUSPARSE_CHECK(cusparseSpMM_bufferSize(handle, opA, opB, (const void*)alpha, matA, matB, 
+                                         beta, matC, CUDA_R_32F, alg, &bufferSize));
+
+  MemoryPiece::PtrType buffer = allocator->alloc<uint8_t>(bufferSize);
+  auto status = cusparseSpMM(handle, opA, opB, (const void*) alpha, matA, matB, 
+                             (const void*)beta, matC, CUDA_R_32F, alg, (void*)buffer->data());
+
+  cusparseDestroySpMat(matA);
+  cusparseDestroyDnMat(matB);
+  cusparseDestroyDnMat(matC);
+  allocator->free(buffer);
+
+  return status;
+}
+
+cusparseStatus_t static cusparseSpMMTyped(cusparseHandle_t handle,
+                                          Ptr<Allocator> allocator,
+                                          bool transA, bool transB,
+                                          int m, int n, 
+                                          int k, int nnz,
+                                          const half* alpha,
+                                          const half* csrValA,
+                                          const int* csrRowPtrA,
+                                          const int* csrColIndA,
+                                          const half* B,
+                                          int ldb,
+                                          const half* beta,
+                                          half* C,
+                                          int ldc) 
+{
+  cusparseOperation_t opA = transA? CUSPARSE_OPERATION_TRANSPOSE : CUSPARSE_OPERATION_NON_TRANSPOSE;
+  cusparseOperation_t opB = transB? CUSPARSE_OPERATION_TRANSPOSE : CUSPARSE_OPERATION_NON_TRANSPOSE;
+  cusparseSpMatDescr_t matA;
+  CUSPARSE_CHECK(cusparseCreateCsr(&matA, m, k, nnz, (void*)csrRowPtrA, (void*)csrColIndA, (void*)csrValA, 
+                                   CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_16F));
+  
+  cusparseDnMatDescr_t matB;
+  CUSPARSE_CHECK(cusparseCreateDnMat(&matB, k, n, ldb, (void*)B, CUDA_R_16F, CUSPARSE_ORDER_ROW));
+
+  cusparseDnMatDescr_t matC;
+  CUSPARSE_CHECK(cusparseCreateDnMat(&matC, m, n, ldc, (void*)C , CUDA_R_16F, CUSPARSE_ORDER_ROW));
+
+  cusparseSpMMAlg_t alg = CUSPARSE_SPMM_ALG_DEFAULT;
+
+  size_t bufferSize = 0;
+  CUSPARSE_CHECK(cusparseSpMM_bufferSize(handle, opA, opB, (const void*)alpha, matA, matB, 
+                                         beta, matC, CUDA_R_16F, alg, &bufferSize));
+
+  MemoryPiece::PtrType buffer = allocator->alloc<uint8_t>(bufferSize);
+  auto status = cusparseSpMM(handle, opA, opB, (const void*) alpha, matA, matB, 
+                             (const void*)beta, matC, CUDA_R_16F, alg, (void*)buffer->data());
+
+  cusparseDestroySpMat(matA);
+  cusparseDestroyDnMat(matB);
+  cusparseDestroyDnMat(matC);
+  allocator->free(buffer);
+
+  return status;
+}
+#endif
+
 // @TODO: make this work with fp16
 
 // C = op(S) x D if not swapOperands else C = D x op(S)
@@ -494,6 +594,11 @@ void CSRProd(marian::Tensor C,
     std::swap(rowsD, colsD);
     std::swap(rowsS, colsS);
   }
+
+#if CUDA_VERSION < 11000
+    matchOrAbort<float>(S_values->type());
+#endif
+
   // sparse arrays
   auto numValues  = S_values->shape().elements();
   auto numOffsets = S_offsets->shape().elements() - 1; // -1 since last value is length
@@ -511,6 +616,7 @@ void CSRProd(marian::Tensor C,
     // transpose the second argument
 #if CUDA_VERSION >= 11000
     size_t buffer_size;
+    matchOrAbort<float>(S_values->type());
     CUSPARSE_CHECK(cusparseCsr2cscEx2_bufferSize(cusparseHandle,
                                           /*m=*/ rowsS, // number of rows of matrix
                                           /*n=*/ colsS, // number of columns of matrix
@@ -570,6 +676,7 @@ void CSRProd(marian::Tensor C,
 #if CUDA_VERSION >= 11000
     ABORT("CSRProd is not yet implemented for CUDA VERSION >= 11");
 #else
+    matchOrAbort<float>(S_values->type());
     cusparseMatDescr_t descrA;
     CUSPARSE_CHECK(cusparseCreateMatDescr(&descrA));
     cusparseSetMatType     (descrA, CUSPARSE_MATRIX_TYPE_GENERAL);
@@ -593,6 +700,45 @@ void CSRProd(marian::Tensor C,
 #endif
   }
   else {
+
+#if CUDA_VERSION >= 11000
+  if(S_values->type() == Type::float32) {
+    CUSPARSE_CHECK(cusparseSpMMTyped(cusparseHandle, allocator, transS, 
+                                     /*transB*/ false,
+                                     rowsS, colsD, rowsD, 
+                                     /*nnz*/ (int)numValues,
+                                     &alpha,
+                                     /*csrValA*/ St_values ? St_values ->data<float>() : S_values ->data<float>(),
+                                     /*csrRowPtrA*/ St_offsets ? St_offsets->data<int>() : (int*)S_offsets->data<IndexType>(),
+                                     /*csrColIndA*/ St_indices ? St_indices->data<int>() : (int*)S_indices->data<IndexType>(),
+                                     D->data<float>(),
+                                     colsD,
+                                     &beta,
+                                     C->data<float>(),
+                                     colsC));
+  } else if(S_values->type() == Type::float16) {
+    // If St_values is and S_values is a float, we should have failed before. This is just another sanity check.
+    ABORT_IF(St_values, "Half support not fully integrated with SpMM");
+    half alphaHalf = __float2half(alpha);
+    half betaHalf = __float2half(beta);
+    CUSPARSE_CHECK(cusparseSpMMTyped(cusparseHandle, allocator, transS, 
+                                     /*transB*/ false,
+                                     rowsS, colsD, rowsD, 
+                                     /*nnz*/ (int)numValues,
+                                     &alphaHalf,
+                                     /*csrValA*/ S_values ->data<half>(),
+                                     /*csrRowPtrA*/ (int*)S_offsets->data<IndexType>(),
+                                     /*csrColIndA*/ (int*)S_indices->data<IndexType>(),
+                                     D->data<half>(),
+                                     colsD,
+                                     &betaHalf,
+                                     C->data<half>(),
+                                     colsC));
+  } else {
+    ABORT("SpMM not implemented for value array type {}", S_values->type());
+  }
+#else
+    // Gemmi calls will be deprecated after CUDA 11 so replace with cuparseSpmm
     // C = S x D for row-major matrices
     // Implemented via cusparse as C' = D' x S' ("gemmi") where C' and D' are column-major.
     CUSPARSE_CHECK(cusparseSgemmiEx(cusparseHandle,
@@ -612,6 +758,7 @@ void CSRProd(marian::Tensor C,
     // Note: cuSparse 10 docs says this about cscColPtrB:
     //   "integer array of k + 1 elements that contains the start of every row and the end of the last row plus one."
     // This is wrong. It should be col instead of row, and n instead of k.
+#endif
   }
   if(St_values ) allocator->free(St_values );
   if(St_indices) allocator->free(St_indices);
