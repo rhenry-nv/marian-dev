@@ -108,7 +108,12 @@ DISPATCH7(Prod, marian::Tensor, const marian::Tensor&, const marian::Tensor&, bo
 DISPATCH8(ProdBatched, marian::Tensor, Ptr<Allocator>, const marian::Tensor, const marian::Tensor, bool, bool, float, float)
 DISPATCH9(CSRProd, marian::Tensor, Ptr<Allocator>, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, bool, bool, float)
 
+<<<<<<< HEAD
 DISPATCH2(ReduceMaxLastAxis, marian::Tensor, const marian::Tensor&)
+=======
+DISPATCH10(Affine, marian::Tensor, Ptr<Allocator>, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, bool, bool, float, float, bool)
+
+>>>>>>> cuda_11
 DISPATCH2(Softmax, marian::Tensor, marian::Tensor)
 DISPATCH3(SoftmaxGrad, marian::Tensor, marian::Tensor, marian::Tensor)
 
