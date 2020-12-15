@@ -79,12 +79,12 @@ public:
     ABORT_IF(std::max(N, (size_t)inputN) > maxBeamSize_, "GetNBestList(): actual beam size {} exceeds initialization parameter {}", N, maxBeamSize_);
 
     if(scores->type() == Type::float32) {
-      float disabledPathScore = -std::numeric_limits<float>::infinity(); 
-      selectNBest(scores->data<float>(), batchFirstElementIdxs, cumulativeBeamSizes, disabledPathScore);
+      selectNBest(scores->data<float>(), dimBatch, inputN, N, vocabSize);
+      getPairs<float>(dimBatch * N, outKeys, outCosts);
 #if COMPILE_FP16
     } else if(scores->type() == Type::float16) {
-      float disabledPathScore = -std::numeric_limits<float>::infinity(); 
-      selectNBest(scores->data<half>(), batchFirstElementIdxs, cumulativeBeamSizes, disabledPathScore);
+      selectNBest(scores->data<half>(), dimBatch, inputN, N, vocabSize);
+      getPairs<half>(dimBatch * N, outKeys, outCosts);
 #endif
     } else {
       ABORT("getNBestList not implemented for type {}", scores->type());
