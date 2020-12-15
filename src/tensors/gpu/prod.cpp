@@ -857,7 +857,7 @@ static cublasStatus_t cublasLtAffineTyped(cublasLtHandle_t ltHandle, cublasOpera
 static cublasStatus_t cublasLtAffineTyped(cublasLtHandle_t ltHandle, cublasOperation_t transA, cublasOperation_t transB,
                                           int m, int n, int k, const float *alpha, const float *A, int lda, const float *B,
                                           int ldb, const float *beta, float *C, int ldc, const float* bias, 
-                                          float* workspace, size_t workspaceSizeBytes,bool do_relu, cudaStream_t stream) {
+                                          float* workspace, size_t workspaceSizeBytes, bool do_relu, cudaStream_t stream) {
   
   return cublasLtAffineHelper(ltHandle, transA, transB, CUDA_R_32F, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, bias, 
                               workspace, workspaceSizeBytes, do_relu, stream);
@@ -923,7 +923,8 @@ void affineTyped(marian::Tensor C, Ptr<Allocator> allocator, const marian::Tenso
                                    bias->data<T>(),
                                    workspace->data<T>(),
                                    workspaceSizeBytes,
-                                   do_relu));
+                                   do_relu,
+                                   stream));
   
   allocator->free(workspace); // TODO fix without synchronize (bad for small batch)
 }
