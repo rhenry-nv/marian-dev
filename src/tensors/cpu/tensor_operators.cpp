@@ -3,11 +3,10 @@
  *   SPDX-License-Identifier: MIT
  */
 
- /* Part of this file was contributed by NVIDIA under license:
+/* Part of this file was contributed by NVIDIA under license:
  *   Copyright (C) 2020 NVIDIA Corporation
  *   SPDX-License-Identifier: MIT
  */
-
 
 #include "tensors/tensor_operators.h"
 #include "tensors/cpu/backend.h"
@@ -33,6 +32,16 @@ namespace cpu {
 void ReduceMaxLastAxis(Tensor /*out*/,
                        const marian::Tensor& /*input*/) {
   ABORT("Not implemented");
+}
+
+void AddFactorMaxes(Tensor /*out*/,
+                    Ptr<Allocator> /*allocator*/,
+                    const Tensor /*lemmaHasFactorGroupTensor*/,
+                    const Tensor /*indices*/,
+                    const std::vector<marian::Tensor>& /*groupLosses*/,
+                    size_t /*groupStart*/,
+                    size_t /*numLemmas*/) {
+  ABORT("AddFactorMaxes not implemented on CPU");
 }
 
 template <typename To, typename From>

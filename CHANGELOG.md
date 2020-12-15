@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Added
+- Add new operator to compute path score for lemmas for a factored vocabulary
 - Adds a fast path to perform a max reduction along the last axis to reduce the H2D communication.
 - Refactors the beam search to batch processing of secondary factors for factored vocabulary models.
 - Batches retrieval of logits from the GPU when the --n-best flag is specified.
