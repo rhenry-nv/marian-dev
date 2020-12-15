@@ -1,8 +1,3 @@
-/* Part of this file was contributed by NVIDIA under license:
- *   Copyright (C) 2020 NVIDIA Corporation
- *   SPDX-License-Identifier: MIT
- */
-
 #include "graph/node_initializers.h"
 #include <algorithm>
 #include "marian.h"
@@ -560,7 +555,10 @@ namespace marian {
     ABORT_IF(factoredData.shape != Shape({(int)factoredData.offsets.size()-1/*=rows of CSR*/, E_->shape()[0]}), "shape mismatch??");
     // the CSR matrix is passed in pieces
     auto weights = graph->constant({ (int)factoredData.weights.size() }, inits::fromVector(factoredData.weights), Type::float32);
-    if(E_->value_type() == Type::float16) weights = cast(weights, Type::float16);
+
+    if (E_->value_type() == Type::float16) 
+      weights = cast(weights, Type::float16);
+      
     auto indices = graph->constant({ (int)factoredData.indices.size() }, inits::fromVector(factoredData.indices), Type::uint32);
     auto offsets = graph->constant({ (int)factoredData.offsets.size() }, inits::fromVector(factoredData.offsets), Type::uint32);
     // apply dropout
