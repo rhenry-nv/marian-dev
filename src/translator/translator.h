@@ -128,7 +128,7 @@ public:
 
   void run(std::function<void(const int, const std::string&)> callback = nullptr) override {
     data::BatchGenerator<data::Corpus> bg(corpus_, options_);
-
+    static int invocations = 1;
     ThreadPool threadPool(numDevices_, numDevices_);
     TimeSentenceLatencies latencyTimer(numDevices_);
     std::mutex mutex;
@@ -195,9 +195,16 @@ public:
     }
 
     threadPool.join_all();
-    latencyTimer.getTimeStatistics();
-    std::ofstream os("callback.txt");
-    latencyTimer.writeInBatchOrder(os);
+    
+    
+    if(invocations == 2) {
+      std::ofstream os("callback.txt");
+      latencyTimer.getTimeStatistics();
+      latencyTimer.writeInBatchOrder(os);
+    }
+
+    ++invocations;
+    
   }
 };
 
