@@ -167,7 +167,6 @@ public:
           latencyTimer.resetThreadTimer(tid);
         }
         
-        marian::timer::Timer timer;
         auto histories = search->search(graph, batch, latencyTimer);
 
         for(auto history : histories) {
@@ -179,8 +178,6 @@ public:
                            bestn.str(),
                            doNbest);
         }
-
-        std::cout << "Batch time " << timer.elapsed() << std::endl;
 
         // progress heartbeat for MS-internal Philly compute cluster
         // otherwise this job may be killed prematurely if no log for 4 hrs
