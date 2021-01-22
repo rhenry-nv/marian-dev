@@ -4,11 +4,8 @@
  */
 
 #include "translator/beam_search.h"
-<<<<<<< HEAD
 #include "tensors/tensor_allocator.h"
-=======
 #include <sstream>
->>>>>>> triton_update
 
 #include "data/factored_vocab.h"
 #include "translator/helpers.h"

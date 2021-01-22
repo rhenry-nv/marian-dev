@@ -69,12 +69,16 @@ struct TimeSentenceLatencies {
         }
         std::sort(sortedTimes.begin(), sortedTimes.end());
         double sum = std::accumulate(sortedTimes.begin(), sortedTimes.end(), 0.0);
-        std::cout << "Average is " << sum / sortedTimes.size() << std::endl;
-        std::cout << "50th percentile " << getPercentile(sortedTimes, 0.5) << std::endl;
-        std::cout << "90th percentile " << getPercentile(sortedTimes, 0.90) << std::endl;
-        std::cout << "95th percentile " << getPercentile(sortedTimes, 0.95) << std::endl;
-        std::cout << "99th percentile " << getPercentile(sortedTimes, 0.99) << std::endl;
-        std::cout << "99.9th percentile " << getPercentile(sortedTimes, 0.999) << std::endl;
+        const double average = sum / sortedTimes.size();
+        std::cout << average << "," << getPercentile(sortedTimes, 0.5) << "," << getPercentile(sortedTimes, 0.9) << ","
+                                    << getPercentile(sortedTimes, 0.95) << "," << getPercentile(sortedTimes, 0.99) << "," 
+                                    << getPercentile(sortedTimes, 0.999) << std::endl;
+        // std::cout << "Average is " << average << std::endl;
+        // std::cout << "50th percentile " << getPercentile(sortedTimes, 0.5) << std::endl;
+        // std::cout << "90th percentile " << getPercentile(sortedTimes, 0.90) << std::endl;
+        // std::cout << "95th percentile " << getPercentile(sortedTimes, 0.95) << std::endl;
+        // std::cout << "99th percentile " << getPercentile(sortedTimes, 0.99) << std::endl;
+        // std::cout << "99.9th percentile " << getPercentile(sortedTimes, 0.999) << std::endl;
     }
 
     void writeInBatchOrder(std::ostream& os) {
