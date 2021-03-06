@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Batches retrieval of logits from the GPU when the --n-best flag is specified.
 - Adds custom bias epilogue kernel.
 - Adds support for fusing relu and bias addition into gemms when using cuda 11.
+- Add new operator to compute path score for lemmas for a factored vocabulary
 - Local/global sharding with MPI training via `--sharding local`
 - fp16 support for factors.
 - Correct training with fp16 via `--fp16`. 

@@ -1,8 +1,3 @@
- /* Part of this file was contributed by NVIDIA under license:
- *   Copyright (C) 2020 NVIDIA Corporation
- *   SPDX-License-Identifier: MIT
- */
-
 #include "translator/beam_search.h"
 #include "tensors/tensor_allocator.h"
 
@@ -438,7 +433,8 @@ Histories BeamSearch::search(Ptr<ExpressionGraph> graph, Ptr<data::CorpusBatch> 
         }
         if(factorGroup == 0)
           currentDimBatch = (IndexType) batchIndices.size(); // keep batch size constant for all factor groups in a time step
-        prevPathScores = graph->constant({(int)maxBeamSize, 1, (int)currentDimBatch, 1}, inits::fromVector(prevScores));
+        // Avoid unnecessary memcpy on GPU  
+        if(anyCanExpand) prevPathScores = graph->constant({(int)maxBeamSize, 1, (int)currentDimBatch, 1}, inits::fromVector(prevScores));
       }
       if (!anyCanExpand) // all words cannot expand this factor: skip
         continue;
