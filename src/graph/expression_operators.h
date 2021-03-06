@@ -491,7 +491,8 @@ Expr affine(Expr a,
             Expr c,
             bool transA = false,
             bool transB = false,
-            float scalar = 1.f);
+            float scalar = 1.f,
+            bool do_relu = false);
 
 /**
  * Computes the dot product of CSR-tensor @p A with @p B.

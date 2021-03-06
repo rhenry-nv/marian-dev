@@ -415,9 +415,10 @@ public:
     auto opsPre = opt<std::string>("transformer-preprocess");
     auto output = preProcess(prefix + "_ffn", opsPre, input, dropProb);
 
+    auto actName = opt<std::string>("transformer-ffn-activation");
     int dimFfn = opt<int>("transformer-dim-ffn");
     int depthFfn = opt<int>("transformer-ffn-depth");
-    auto actFn = activationByName(opt<std::string>("transformer-ffn-activation"));
+    auto actFn = activationByName(actName);
     float ffnDropProb
       = inference_ ? 0 : opt<float>("transformer-dropout-ffn");
 
@@ -426,8 +427,13 @@ public:
     auto initFn = inits::glorotUniform(true, true, depthScaling_ ? 1.f / sqrtf((float)depth_) : 1.f);
 
     // the stack of FF layers
-    for(int i = 1; i < depthFfn; ++i)
-      output = denseInline(output, prefix, /*suffix=*/std::to_string(i), dimFfn, initFn, actFn, ffnDropProb);
+    for(int i = 1; i < depthFfn; ++i) {
+      if (actName == "relu") {
+        output = denseInlineRelu(output, prefix, std::to_string(i), dimFfn, initFn, ffnDropProb);
+      } else {
+        output = denseInline(output, prefix, /*suffix=*/std::to_string(i), dimFfn, initFn, actFn, ffnDropProb);
+      }
+    }
     output = denseInline(output, prefix, /*suffix=*/std::to_string(depthFfn), dimModel, initFn);
 
     auto opsPost = opt<std::string>("transformer-postprocess");

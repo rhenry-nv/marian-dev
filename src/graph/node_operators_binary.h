@@ -233,16 +233,27 @@ private:
   bool transA_;
   bool transB_;
   float scalar_;
+  bool do_relu_;
 
 public:
   AffineNodeOp(const std::vector<Expr>& nodes,
                bool transA,
                bool transB,
-               float scalar)
+               float scalar,
+               bool do_relu=false)
       : NaryNodeOp(nodes, newShape(nodes[0], nodes[1], transA, transB)),
         transA_(transA),
         transB_(transB),
-        scalar_(scalar) {}
+        scalar_(scalar),
+        do_relu_(do_relu) {
+          // ReLU fusion checks
+          ABORT_IF(do_relu && graph()->getBackend()->getDeviceId().type == DeviceType::cpu, "ReLU not fused for CPU backend");
+          ABORT_IF(do_relu && !graph()->isInference(), "ReLU fusion is only supported for GPU inference.");
+
+          // bias fusion checks
+          ABORT_IF(nodes.size() == 3 && graph()->getBackend()->getDeviceId().type == DeviceType::cpu, "Bias addition not specialized for CPU backend");
+          // No check for if inference since the forward computation will be the same.
+        }
 
   Shape newShape(Expr a, Expr b, bool transA, bool transB) {
     auto shapeA = a->shape();
@@ -267,6 +278,24 @@ public:
   NodeOps forwardOps() override {
     using namespace functional;
 
+    if(children_.size() == 3) {
+      ABORT_IF(graph()->getBackend()->getDeviceId().type != DeviceType::gpu, "Snuck passed constructor check? Only supported for GPU backend");
+      // We must be using the GPU backend (Would have aborted otherwise)
+      return {
+        NodeOp(
+          Affine(val_,
+                graph()->allocator(),
+                child(0)->val(),
+                child(1)->val(),
+                child(2)->val(),
+                transA_,
+                transB_,
+                0.f,
+                scalar_,
+                do_relu_))
+      };
+    }
+
     return {
       NodeOp(
           Prod(val_,
@@ -286,6 +315,8 @@ public:
     // df/dB += alpha * dot(op(A).T, D)
     // beta set to 1.0 in gemm, C = alpha * dot(op(A), op(B)) + beta * C
     // to sum gradients from different graph parts
+    using namespace functional;
+    ABORT_IF(do_relu_, "Snuck passed constructor check? ReLU fusion not supported for training.");
 
     auto isParameter = [](Expr p) {
       return std::dynamic_pointer_cast<ParamNode>(p) != nullptr;
@@ -394,6 +425,7 @@ public:
     util::hash_combine(seed, transA_);
     util::hash_combine(seed, transB_);
     util::hash_combine(seed, scalar_);
+    util::hash_combine(seed, do_relu_);
     return seed;
   }
 
@@ -408,6 +440,8 @@ public:
     if(transB_ != cnode->transB_)
       return false;
     if(scalar_ != cnode->scalar_)
+      return false;
+    if(do_relu_ != cnode->do_relu_)
       return false;
     return true;
   }

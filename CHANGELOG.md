@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 - Rounds the width of input batches to a multiple of 8 when the GPU backend is being used. This is to enable better use of tensorcores on Volta architectures and newer.
 - Places NVIDIA notices to some files
 - Batches retrieval of logits from the GPU when the --n-best flag is specified.
+- Adds custom bias epilogue kernel.
+- Adds support for fusing relu and bias addition into gemms when using cuda 11.
 - Local/global sharding with MPI training via `--sharding local`
 - fp16 support for factors.
 - Correct training with fp16 via `--fp16`. 
