@@ -325,7 +325,6 @@ private:
   size_t numDevices_;
 
   void (*callback_)(int, const char*, void*) = nullptr;
-  void* userData_ = nullptr;
 
 public:
   virtual ~TranslateServiceAsync() {}
@@ -377,12 +376,7 @@ public:
     }
   }
 
-  void registerCallback(void (*callback)(int, const char*, void*), void* userData) override {
-    callback_ = callback;
-    userData_ = userData;
-  }
-
-  void run(const std::string& input) override {
+  void run(const std::string& input, void (*callback)(int, const char*, void*), void* userData) override {
     // split tab-separated input into fields if necessary
     auto inputs = options_->get<bool>("tsv", false)
                       ? convertTsvToLists(input, options_->get<size_t>("tsv-fields", 1))
@@ -410,7 +404,7 @@ public:
           }
 
           auto search = New<Search>(options_, scorers, trgVocab_);
-          search->search(graph, batch, callback_);
+          search->search(graph, batch, callback, userData);
         };
 
         threadPool_.enqueue(task, batchId);
