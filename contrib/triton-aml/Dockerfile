@@ -42,7 +42,7 @@ RUN ./b2 install --prefix=/usr --with-system --with-thread --with-date_time --wi
 
 # Marian install
 WORKDIR /
-RUN  git clone --no-checkout https://github.com/rhenry-nv/marian-dev.git
+RUN git clone --no-checkout https://github.com/rhenry-nv/marian-dev.git
 WORKDIR marian-dev
 RUN git checkout async_return
 RUN mkdir src/static
@@ -95,5 +95,7 @@ ADD marian_backend /opt/tritonserver/marian_backend
 WORKDIR /opt/tritonserver/marian_backend
 RUN mkdir build
 RUN cd build && \
-    cmake -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install .. && \
-    make install
+    cmake -DTRITON_BACKEND_REPO_TAG=ccd6883947d384e21bc3f1ef7130170c6aa341c6 \
+          -DTRITON_CORE_REPO_TAG=c2a3825e67aaf8413e8436b8eec44f21bc4bdac6 \
+          -DTRITON_COMMON_REPO_TAG=044e5145c5b3ec7290b395e257a0dde5678e85f2 \ 
+          -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install .. && make install
