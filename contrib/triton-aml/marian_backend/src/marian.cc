@@ -944,7 +944,20 @@ TRITONSERVER_Error* serveRequestsAsync(
             );
         }
 
-        std::string s(content_buffer.begin(), content_buffer.end());
+        // First, deduplicate new lines and place in s.
+        std::string s;
+        for (size_t i = 0; i < content_buffer.size(); ++i) {
+            if (i > 0 && content_buffer[i-1] == '\n' && content_buffer[i] == '\n') {
+                continue;
+            }
+            s.append(std::string(1, content_buffer[i]));
+        }
+
+        if(!s.empty() && s.back() == '\n') {
+            s.erase(s.length() - 1);
+        }
+
+        // Check the number of sentences packed into one request by counting new lines. These actually partition a request.
         int count = std::count(s.begin(), s.end(), '\n');
         content_buffer.clear();
 
