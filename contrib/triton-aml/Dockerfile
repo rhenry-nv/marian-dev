@@ -41,6 +41,11 @@ RUN ./bootstrap.sh
 RUN ./b2 install --prefix=/usr --with-system --with-thread --with-date_time --with-regex --with-serialization
 
 # Marian install
+RUN apt-get update
+RUN apt install -y software-properties-common 
+RUN add-apt-repository ppa:ubuntu-toolchain-r/test 
+RUN apt install -y gcc-8 g++-8
+
 WORKDIR /
 RUN git clone --no-checkout https://github.com/rhenry-nv/marian-dev.git
 WORKDIR marian-dev
@@ -54,8 +59,11 @@ COPY src/CMakeLists.txt /marian-dev/src
 
 WORKDIR /marian-dev/build
 RUN cmake .. -DCOMPILE_CPU=on -DCOMPILE_CUDA=on -DUSE_SENTENCEPIECE=on -DUSE_STATIC_LIBS=off -DCOMPILE_SERVER=off -DUSE_FBGEMM=on  \ 
-             -DCOMPILE_CUDA_SM35=off -DCOMPILE_CUDA_SM50=off -DCOMPILE_CUDA_SM60=off -DCOMPILE_CUDA_SM70=on -DCOMPILE_CUDA_SM75=on \
-             -DCUDA_cublas_device_LIBRARY=/usr/local/cuda/lib64/libcublas.so
+             -DCOMPILE_PASCAL=on -DCOMPILE_VOLTA=on -DCOMPILE_TURING=on -DCOMPILE_AMPERE=off \
+             -DCUDA_cublas_device_LIBRARY=/usr/local/cuda/lib64/libcublas.so \
+             -DCMAKE_C_COMPILER="/usr/bin/gcc-8" \ 
+             -DCMAKE_CXX_COMPILER="/usr/bin/g++-8"
+
 
 RUN make -j $(grep -c ^processor /proc/cpuinfo)
 
