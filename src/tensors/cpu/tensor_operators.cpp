@@ -2,6 +2,11 @@
  *   Copyright (C) 2017-2018 Intel Corporation
  *   SPDX-License-Identifier: MIT
  */
+ 
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
 
 #include "tensors/tensor_operators.h"
 #include "tensors/cpu/backend.h"
@@ -22,6 +27,26 @@ namespace cpu {
 
   void IsNaN(const Tensor /*in*/, Ptr<Allocator> /*allocator*/, bool& /*isNaN*/, bool& /*isInf*/) {
   ABORT("Not implemented");
+}
+
+void AddPosEmbeddings(marian::Tensor /*result*/, const marian::Tensor& /*embeddings*/, float /*scaleFactor*/, int /*startPos*/) {
+  ABORT("Not implemented");
+}
+
+
+void AddBiasSkipAndLayerNormalization(Tensor /*out*/, Tensor /*in*/, Tensor /*bias*/, Tensor /*prevInput*/, Tensor /*gamma*/,
+                                      Tensor /*beta*/, float /*eps*/) {
+  ABORT("Not implemented");
+}
+
+void AddFactorMaxes(Tensor /*out*/,
+                    Ptr<Allocator> /*allocator*/,
+                    const Tensor /*lemmaHasFactorGroupTensor*/,
+                    const Tensor /*indices*/,
+                    const std::vector<marian::Tensor>& /*groupLosses*/,
+                    size_t /*groupStart*/,
+                    size_t /*numLemmas*/) {
+  ABORT("AddFactorMaxes not implemented on CPU");
 }
 
 template <typename To, typename From>
@@ -654,40 +679,63 @@ void PasteCols(Tensor out_,
   }
 }
 
-#if 0 // this version seems to actually be buggy, but also not used in decoding?
-// Optimized version of Select for axis=2
-// @TODO: make this generally fast without this special version
-void SelectAxis2(Tensor out,
-             const Tensor in,
-             const Tensor indices) {
-
-  std::cerr << indices->debug() << std::endl;
-
-  matchOrAbort<IndexType>(indices->type());
-
-  functional::Shape outShape = out->shape();
-  functional::Shape inShape = in->shape();
-
-  auto idxData = indices->data<IndexType>();
-  auto odata = out->data();
-  const auto idata = in->data();
-
-  int size = outShape[3];
-
-  for(int k = 0; k < outShape[0]; ++k) {
-    for(int j = 0; j < outShape[1]; ++j) {
-      int outOffset = k * j * outShape[2] * size + j * outShape[2] * size;
-      int inOffset = k * j * inShape[2] * size + j * inShape[2] * size;
-      for(int i = 0; i < outShape[2]; ++i) {
-        auto idx = idxData[i];
-        int outIndex = outOffset +   i * size;
-        int inIndex  = inOffset  + idx * size;
-        std::copy(idata + inIndex, idata + inIndex + size, odata + outIndex);
+/* Recursive template to implement LoopBeforeAxis. */
+template <class Backend, int Before> struct LoopBeforeAxisImpl {
+  static inline void Loop(
+      const functional::Shape &outShape, int outBase,
+      const functional::Shape &inShape, int inBase,
+      const functional::Shape &idxShape, int idxBase,
+      int axisCPU,
+      Backend backend) {
+    // Loop over this dimension.
+    const int dim = axisCPU - Before;
+    if (dim < 0) {
+      // This template is instantiated for every possible dimension, typically
+      // more than before the axis.
+      LoopBeforeAxisImpl<Backend, Before - 1>::Loop(outShape, outBase, inShape, inBase, idxShape, idxBase, axisCPU, backend);
+    } else {
+      const int outStride = outShape.stride(dim);
+      const int end = outShape.dim(dim);
+      const int inStride = inShape.stride(dim);
+      const int idxStride = idxShape.bstride(dim);
+      for (int i = 0; i < end; ++i) {
+        LoopBeforeAxisImpl<Backend, Before - 1>::Loop(outShape, outBase, inShape, inBase, idxShape, idxBase, axisCPU, backend);
+        outBase += outStride;
+        inBase += inStride;
+        idxBase += idxStride;
       }
     }
   }
+};
+
+/* We're at the axis, call the functor. */
+template <class Backend> struct LoopBeforeAxisImpl<Backend, 0> {
+  static inline void Loop(
+      const functional::Shape &, int outBase,
+      const functional::Shape &, int inBase,
+      const functional::Shape &, int idxBase,
+      int /*axisCPU*/,
+      Backend backend) {
+    backend(outBase, inBase, idxBase);
+  }
+};
+
+/* Jointly loop over dimensions [0, axisCPU) of three tensors out, in, and
+ * indices.  Call the Backend functor for each iteration of the loop.
+ * Backend is a functor taking the tensors and base indices into them:
+ * Backend::operator()(
+ *   int out_base,
+ *   int in_base,
+ *   int indices_base);
+ */
+template <class Backend> inline void LoopBeforeAxis(
+    const functional::Shape &outShape,
+    const functional::Shape &inShape,
+    const functional::Shape &idxShape,
+    int axisCPU,
+    Backend backend) {
+  LoopBeforeAxisImpl<Backend, functional::Shape::size()>::Loop(outShape, 0, inShape, 0, idxShape, 0, axisCPU, backend);
 }
-#endif
 
 void Select(Tensor out,
             const Tensor in,
@@ -696,19 +744,50 @@ void Select(Tensor out,
 
   matchOrAbort<IndexType>(indices->type());
 
-  // @TODO: make this efficient
   functional::Shape outShape = out->shape();
   functional::Shape inShape  = in->shape();
   functional::Shape idxShape = indices->shape();
-  int length = outShape.elements();
 
-  functional::Array<int, functional::Shape::size()> dims;
   int axisCPU = (int)(axis + functional::Shape::size() - out->shape().size());
 
-#if 0 // buggy but not really used?
-  if(axisCPU == 2 && outShape == idxShape) // specialization for axis==2 when there is no broadcasting, @TODO to be removed once we have a faster implementation below
-    return SelectAxis2(out, in, indices);
-#endif
+  // Are all index dimensions 1 after the axis?
+  bool flatIndices = true;
+  // Total dimensionality of input and output after the axis.
+  int afterAxis = 1;
+  for (int i = axisCPU + 1; i < functional::Shape::size(); ++i) {
+    afterAxis *= outShape[i];
+    if (idxShape[i] != 1) {
+      flatIndices = false;
+    }
+  }
+  /* Faster version based on copying. Requirements:
+   * input is contiguous for every dimension after the axis.
+   * output is contiguous for every dimension after the axis.
+   * indices have shape 1 for every dimension after the axis.
+   */
+  if (afterAxis == inShape.stride(axisCPU) && afterAxis == outShape.stride(axisCPU) && flatIndices) {
+    const int end = outShape.dim(axisCPU);
+    const int outStride = outShape.stride(axisCPU);
+    const int idxStride = idxShape.bstride(axisCPU);
+    // Loop over all dimensions before the axis.
+    LoopBeforeAxis(outShape, inShape, idxShape, axisCPU,
+        [out, in, indices, afterAxis, end, outStride, idxStride](int outBase, int inBase, int idxBase) {
+          // Loop over the axis dimension.
+          for (int i = 0; i < end; ++i) {
+            int index = indices->data<IndexType>()[idxBase];
+            // Loop over all dimensions after the axis.
+            std::copy(in->data() + inBase + index * afterAxis, in->data() + inBase + index * afterAxis + afterAxis, out->data() + outBase);
+            outBase += outStride;
+            idxBase += idxStride;
+          }
+        });
+    return;
+  }
+
+  // @TODO: make this efficient
+  int length = outShape.elements();
+  // Loop over outer dimensions (those before the axis).
+  functional::Array<int, functional::Shape::size()> dims;
 
   for(int index = 0; index < length; ++index) {
     outShape.dims(index, dims);                                // compute dimension-based indices from global index;
@@ -878,7 +957,7 @@ void GRUFastBackward(std::vector<Tensor> outputs,
   }
 }
 
-void CrossEntropyPick(Tensor out, Tensor in, Tensor labelIndices) {
+void CrossEntropyPick(Tensor out, Tensor in, Tensor labelIndices, float labelSmoothingAlpha = 0.f) {
   matchOrAbort<IndexType>(labelIndices->type());
 
   // Shape& outShape = out_->shape();
@@ -896,23 +975,34 @@ void CrossEntropyPick(Tensor out, Tensor in, Tensor labelIndices) {
       max = std::max(max, sp[i]);
     }
 
-    float sum = 0.f;
+    float sumexp = 0.f;
     #pragma omp simd reduction(+ : sum)
     for(int i = 0; i < cols; ++i) {
-      sum += std::exp(sp[i] - max);
+      sumexp += std::exp(sp[i] - max);
     }
+
+    float mean = 0.f;
+    #pragma omp simd reduction(+ : sum)
+    for(int i = 0; i < cols; ++i) {
+      mean += sp[i] - max;
+    }
+    mean /= (float)cols;
 
     // Groundtruth label index
     IndexType i = labelIndices->data<IndexType>()[j];
     // This appears to be safe i.e. that i >= 0 && i < cols is known
-    out->data()[j] = std::log(sum) - sp[i] + max;    // -log(p_i) = - logsoftmax(x_i - max) = - (x_i - max) - log(sum_j exp(x_j - max))
+    float logsumexp = std::log(sumexp);
+    float ce = logsumexp - sp[i] + max; // -log(p_i) = - logsoftmax(x_i - max) = - (x_i - max) - log(sum_j exp(x_j - max))
+    float ls = logsumexp - mean; 
+    out->data()[j] = (1.f - labelSmoothingAlpha) * ce + labelSmoothingAlpha * ls;
   }
 }
 
 void CrossEntropyPickBackward(Tensor out,
                               Tensor adj,
                               Tensor in,
-                              Tensor labelIndices) {
+                              Tensor labelIndices,
+                              float labelSmoothingAlpha = 0.f) {
 
   matchOrAbort<IndexType>(labelIndices->type());
   Shape& outShape = out->shape();
@@ -930,16 +1020,17 @@ void CrossEntropyPickBackward(Tensor out,
       max = std::max(max, sp[i]);
     }
 
-    float sum = 0.f;
+    float sumexp = 0.f;
     for(int i = 0; i < cols; ++i) {
-      sum += std::exp(sp[i] - max);
+      sumexp += std::exp(sp[i] - max);
     }
 
     // cross-entropy
     for(int i = 0; i < cols; ++i) {
       float sub = (float)(i == (int)labelIndices->data<IndexType>()[j]); // delta, true if label index and column index match
-      auto softmax = std::exp(sp[i] - max) / sum;
-      so[i] += adj->data()[j] * (softmax - sub);
+      float dce = std::exp(sp[i] - max) / sumexp - sub 
+                + labelSmoothingAlpha * (sub - 1.f / (float)cols);
+      so[i] += adj->data()[j] * dce;
     }
   }
 }

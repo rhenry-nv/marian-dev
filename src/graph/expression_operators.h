@@ -1,3 +1,8 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 #include "graph/expression_graph.h"
 #include "graph/node_initializers.h"
@@ -147,7 +152,8 @@ Expr affine(Expr a,
             Expr c,
             bool transA = false,
             bool transB = false,
-            float scalar = 1.f);
+            float scalar = 1.f,
+            bool do_relu = false);
 
 Expr csr_dot(const Shape& A_shape, Expr Avalues, Expr Aindices, Expr Aoffsets, Expr B, bool transA = false);
 Expr dot_csr(Expr A, const Shape& B_shape, Expr B_values, Expr B_indices, Expr B_offsets, bool transB = false);
@@ -171,6 +177,10 @@ Expr atleast_2d(Expr a);
 Expr atleast_3d(Expr a);
 Expr atleast_4d(Expr a);
 Expr atleast_nd(Expr a, size_t dims);
+
+Expr addPosEmbedding(Expr embeddings, float scaleFactor, int startPos);
+
+Expr addFactorMaxes(Expr lemmaHasFactorGroup, std::vector<Expr> groupLosses, Expr hypIndices, size_t groupStart, size_t numLemmas);
 
 // create a constant of shape a->shape() and initialize with init
 // @TODO: add a && version, to avoid a ref count. NodeInitializers are typically temps.
@@ -264,7 +274,7 @@ Expr softmax(Expr a, Expr zeroOneMask, int axis = -1);
 
 Expr logsoftmax(Expr a);
 
-Expr cross_entropy(Expr a, Expr b);
+Expr cross_entropy(Expr a, Expr b, float labelSmoothingAlpha = 0.f, Type outputType = Type::float32);
 
 Expr unlikelihood(Expr a, Expr b);
 
@@ -276,6 +286,8 @@ Expr sqrt(Expr a, float eps = 0.f);
 Expr square(Expr a);
 
 Expr layerNorm(Expr x, Expr gamma, Expr beta = nullptr, float eps = 1e-9);
+
+Expr addBiasSkipAndLayerNorm(Expr x, Expr prevInput, Expr gamma, Expr beta = nullptr, Expr bias = nullptr, float eps = 1e-9);
 
 Expr highway(Expr y, Expr x, Expr t);
 Expr highway(const std::string prefix, Expr x);

@@ -4,7 +4,7 @@
 
 #include <sstream>
 
-#include "tensors/cpu/fbgemm/expression_graph_packable.h"
+#include "tensors/cpu/expression_graph_packable.h"
 #include "onnx/expression_graph_onnx_exporter.h"
 
 int main(int argc, char** argv) {
@@ -23,8 +23,9 @@ int main(int argc, char** argv) {
         "  ./marian-conv -f model.npz -t model.bin --gemm-type packed16");
     cli->add<std::string>("--from,-f", "Input model", "model.npz");
     cli->add<std::string>("--to,-t", "Output model", "model.bin");
+    cli->add<std::string>("--gemm-type,-g", "GEMM Type to be used: float32, packed16, packed8avx2, packed8avx512, intgemm8, intgemm16", "float32");
+    cli->add<bool>("--float-Wemb", "Do not compress the Wemb matrix. Only available when using intgemm8 format.", false);
     cli->add<std::string>("--export-as", "Kind of conversion: marian-bin or onnx-{encode,decoder-step,decoder-init,decoder-stop}", "marian-bin");
-    cli->add<std::string>("--gemm-type,-g", "GEMM Type to be used: float32, packed16, packed8avx2, packed8avx512", "float32");
     cli->add<std::vector<std::string>>("--vocabs,-V", "Vocabulary file, required for ONNX export");
     cli->parse(argc, argv);
     options->merge(config);
@@ -34,17 +35,21 @@ int main(int argc, char** argv) {
 
   auto exportAs = options->get<std::string>("export-as");
   auto vocabPaths = options->get<std::vector<std::string>>("vocabs");// , std::vector<std::string>());
-  
+
   auto saveGemmTypeStr = options->get<std::string>("gemm-type", "float32");
   Type saveGemmType;
   if(saveGemmTypeStr == "float32") {
     saveGemmType = Type::float32;
-  } else if(saveGemmTypeStr == "packed16") {  // packed16 only supports AVX2. AVX512 might be added later
+  } else if(saveGemmTypeStr == "packed16") {  // packed16 (fbgemm) only supports AVX2. AVX512 might be added later
     saveGemmType = Type::packed16;
-  } else if(saveGemmTypeStr == "packed8avx2") { // packed8 for AVX2
+  } else if(saveGemmTypeStr == "packed8avx2") { // packed8 for AVX2 (fbgemm)
     saveGemmType = Type::packed8avx2;
-  } else if(saveGemmTypeStr == "packed8avx512") { // packed8 for AVX512
+  } else if(saveGemmTypeStr == "packed8avx512") { // packed8 for AVX512 (fbgemm)
     saveGemmType = Type::packed8avx512;
+  } else if(saveGemmTypeStr == "intgemm8") { // intgemm 8 bit format
+    saveGemmType = Type::intgemm8;
+  } else if(saveGemmTypeStr == "intgemm16") { // intgemm 16 bit format
+    saveGemmType = Type::intgemm16;
   } else {
     ABORT("Unknown gemm-type: {}", saveGemmTypeStr);
   }
@@ -56,9 +61,11 @@ int main(int argc, char** argv) {
   marian::io::getYamlFromModel(config, "special:model.yml", modelFrom);
   configStr << config;
 
-  auto load = [&](Ptr<ExpressionGraph> graph) {
+  auto load = [&](Ptr<ExpressionGraphPackable> graph) {
     graph->setDevice(CPU0);
-    graph->getBackend()->setOptimized(false);
+    graph->getBackend()->setInt8(false);  // Since win run graph->forward() we need to make sure it does not get converted to an intgemm format during it.
+    graph->getBackend()->setInt16(false); // We manually do the compression later.
+    graph->compressWemb = !options->get<bool>("float-Wemb"); //The variable is reversed because, sue me
 
     graph->load(modelFrom);
     graph->forward();  // run the initializers

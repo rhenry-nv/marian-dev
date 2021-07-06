@@ -1,3 +1,8 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include "common/config.h"
@@ -26,22 +31,28 @@ private:
 
   typedef std::unordered_map<size_t, std::vector<WExpr>> WeakMemory;
   typedef std::unordered_map<size_t, std::vector<Expr>> Memory;
+  //typedef std::unordered_map<std::string, Expr> ShortlistMemory; //Because... yeah
+
+  std::map<std::string, Expr> memoizationMap_;
 
   Ptr<WeakMemory> shortterm_;
   Ptr<Memory> longterm_;
+  //Ptr<ShortlistMemory> midterm_;
 
 public:
   Tensors(Ptr<Backend> backend)
       : tensors_(New<TensorAllocator>(backend)),
         cache_(New<TensorAllocator>(backend)),
         shortterm_(New<WeakMemory>()),
-        longterm_(New<Memory>()) {}
+        longterm_(New<Memory>())/*,
+        midterm_(New<ShortlistMemory>())*/ {}
 
   Tensors(Ptr<Backend> backend, Ptr<Device> device)
       : tensors_(New<TensorAllocator>(backend, device)),
         cache_(New<TensorAllocator>(backend)),
         shortterm_(New<WeakMemory>()),
-        longterm_(New<Memory>()) {}
+        longterm_(New<Memory>())/*,
+        midterm_(New<ShortlistMemory>())*/ {}
 
   void reserve(size_t bytes) { tensors_->reserve(bytes); }
 
@@ -72,6 +83,43 @@ public:
     size_t hash = node->hash();
     // memoize constant nodes that are not parameters
     // parameters are already memoized in the graph itself
+
+    // int size1 = 0;
+    // for (auto it = longterm_->begin(); it != longterm_->end(); it++) {
+    //   size1 += it->second.size();
+    // }
+
+    // int size2 = 0;
+    // for (auto it = shortterm_->begin(); it != shortterm_->end(); it++) {
+    //   size2 += it->second.size();
+    // }
+    // std::cerr << "Longterm: " << size1 << " shortterm: " << size2 << std::endl;
+
+    // When we have a shortlist, we're getting screwed by the constantly changing shortlist
+    // Which is necessary for this batch, but not for anything else. The current cache mechanism has no notion of
+    // "Keep those tensors cached but delete them once it is over". Conveniently, they all have different hashes
+    // making it difficult to isolate them inside the longterm memory.
+    // Somewhat less important, the same thing happens with:
+    // F0::none_QuantMultA Type: alphaNodeOp shape: shape=1 size=1  and
+    // none_QuantMultB Type: intgemmQuantMultB shape: shape=1 size=1
+    // But as their sizes are very small, they are less of an issue.
+    // Those are actually constant, but as they have different parents, marian cache doesn't match them.
+    // To fix those, in intgemm_interface we're hashing the name() string and comparing its equality of the equals method.
+    /*if (node->type() == "intgemmSelectColumnsB") {
+      auto it = midterm_->find("intgemmSelectColumnsB");
+      //std::cerr << "Midterm size: " << midterm_->size() << std::endl;
+      if (it != midterm_->end()) {
+        if (it->second->hash() == hash) {
+          return it->second;
+        } else {
+          it->second->free();
+          midterm_->clear();
+        }
+      }
+      (*midterm_)["intgemmSelectColumnsB"] = node;
+      return nullptr;
+
+    } else */
     if(node->type() != "param" && node->memoize()) {
       auto it = longterm_->find(hash);
       if(it != longterm_->end()) {
@@ -85,6 +133,8 @@ public:
           //}
         }
       }
+
+      //std::cerr << "Longterm: " << longterm_->size() << " " << node->name() << " Type: " << node->type() << " shape: " << node->shape() << std::endl;
       (*longterm_)[hash].push_back(node);
     }
 
@@ -96,7 +146,21 @@ public:
         }
       }
     }
+    //std::cerr << "Shortterm size: " << (*shortterm_).size() << " Name: " << node->name() << " Type: " << node->type() << " shape: " << node->shape() << " bucket_size: " << (*shortterm_)[hash].size() << std::endl;
     (*shortterm_)[hash].push_back(node.get()); // weakPtr
+    return nullptr;
+  }
+
+  void rememberByName(const std::string& name, Expr e) {
+    ABORT_IF(e == nullptr, "Expression must be non-null");
+    ABORT_IF(e->type() == "param", "Not intended for graph parameters");
+    memoizationMap_[name] = e;
+    findOrRemember(e);
+  }
+
+  Expr findByName(const std::string&name) {
+    if(memoizationMap_.count(name))
+      return findOrRemember(memoizationMap_[name]);
     return nullptr;
   }
 
@@ -432,7 +496,7 @@ public:
     ABORT_IF(paramsByElementType_.empty(), "No parameter object has been created");
     
     // Safeguard against accessing parameters from the outside with multiple parameter types, not yet supported
-    ABORT_IF(paramsByElementType_.size() > 1, "Calling of params() is currently not supported with multiple ({}) parameters", paramsByElementType_.size());
+    //ABORT_IF(paramsByElementType_.size() > 1, "Calling of params() is currently not supported with multiple ({}) parameters", paramsByElementType_.size());
     
     // Safeguard against accessing parameters from the outside with other than default parameter type, not yet supported
     auto it = paramsByElementType_.find(defaultElementType_);
@@ -470,6 +534,14 @@ public:
 
   // Returns the tensor allocator of the graph workspace, different from above as proper tensor objects are allocated
   Ptr<TensorAllocator> getTensorAllocator() { return tensors_->getTensorAllocator(); }
+
+  void rememberByName(const std::string& name, Expr e) {
+    tensors_->rememberByName(name, e);
+  }
+
+  Expr findByName(const std::string&name) {
+    return tensors_->findByName(name);
+  }
 
   void clear() {
     // clear everything apart from parameters and memoized nodes

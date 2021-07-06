@@ -1,3 +1,9 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+
+#include "graph/node_initializers.h"
 #include "marian.h"
 
 #include "layers/generic.h"
@@ -7,6 +13,9 @@
 #include "rnn/types.h"     // for State::select()
 #include "models/states.h" // for EncoderState
 #include "layers/lsh.h"
+#include "tensors/cpu/intgemm_interface.h"
+#include "tensors/gpu/integer_interface.h"
+
 
 namespace marian {
   Logits::Logits(Expr logits) : Logits(New<RationalLoss>(logits, nullptr)) {} // single-output constructor from Expr only (RationalLoss has no count)
@@ -77,19 +86,26 @@ namespace marian {
     //  - lemma: add all maxes of applicable factors
     if (groupIndex > 0) {
       sel = sel - max(sel, -1);
-    }
-    else {
+    } else {
       auto numGroups = getNumFactorGroups();
-      for (size_t g = 1; g < numGroups; g++) {
-        auto factorMaxima = max(logits_[g]->loss(), -1);
-        auto factorMasks = constant(getFactorMasks(g, shortlist ? shortlist->indices() : std::vector<WordIndex>()));
-        sel = sel + factorMaxima * factorMasks; // those lemmas that don't have a factor get multiplied with 0
+      if(numGroups > 1 && graph()->isInference() && graph()->getBackend()->getDeviceId().type == DeviceType::gpu) {
+        Expr shortlistExpr = shortlist? constant(shortlist->indices()) : nullptr;
+        sel = addFactorMaxesHelper(shortlistExpr); 
+      } else {
+        for (size_t g = 1; g < numGroups; g++) {
+          auto factorMaxima = max(logits_[g]->loss(), -1);
+          Expr factorMasks = constant(getFactorMasks(g, shortlist ? shortlist->indices() : std::vector<WordIndex>()));
+          sel = sel + factorMaxima * factorMasks; // those lemmas that don't have a factor get multiplied with 0
+        }
       }
     }
+    
 
     // if selIdx are given, then we must reshuffle accordingly
-    if (!hypIndices.empty()) // use the same function that shuffles decoder state
-      sel = rnn::State::select(sel, hypIndices, (int)beamSize, /*isBatchMajor=*/false);
+    if (!hypIndices.empty()) { // use the same function that shuffles decoder state
+      auto indices = graph()->indices(hypIndices);
+      sel = rnn::State::select(sel, indices, (int)beamSize, /*isBatchMajor=*/false);
+    }
     return sel;
   }
 
@@ -184,6 +200,48 @@ namespace marian {
       res.push_back((float)factoredVocab_->lemmaHasFactorGroup(lemma, factorGroup));
     }
     return res;
+  }
+
+  Expr Logits::addFactorMaxesHelper(Expr indices) const {
+  auto g = graph();
+  const std::string name = "lemmaHasFactorGroup";
+  auto lemmaHasFactorGroupTensor = g->findByName(name);
+  if(!lemmaHasFactorGroupTensor) {
+      // We want to make this a graph param so the GPU can use this to implement lemmaHasFactorGroup to avoid unneeded memcpys.
+      const auto lemmaHasFactorGroup = factoredVocab_->getLemmaHasFactorGroupVector();
+      int dimLemma = (int)lemmaHasFactorGroup.size();
+      int dimFactorGroup = (int)lemmaHasFactorGroup[0].size();
+
+      for(const auto&  lemma : lemmaHasFactorGroup) {
+        // Paranoid check - Instead of aborting I think we can pad here and copy the array
+        ABORT_IF(lemma.size() != dimFactorGroup, "All groups must be the same size");
+      }
+
+      auto initFunc = [lemmaHasFactorGroup, dimLemma, dimFactorGroup] (Tensor t) {
+        std::vector<int8_t> flattened(dimLemma * dimFactorGroup);
+        int row = 0;
+        for(const auto& v : lemmaHasFactorGroup) {
+          int offset = row * dimFactorGroup;
+          for(int i = 0; i < v.size(); ++i) {
+            flattened[offset + i] = static_cast<int8_t>(v[i]);
+          }
+          ++row;
+        }
+        t->set(flattened);
+      };
+
+      lemmaHasFactorGroupTensor = graph()->constant({dimLemma, dimFactorGroup}, inits::fromLambda(initFunc), Type::int8);
+      lemmaHasFactorGroupTensor->setMemoize(true);
+      g->rememberByName(name, lemmaHasFactorGroupTensor);
+    }
+    size_t n = indices ?  indices->shape().elements() : (factoredVocab_->getGroupRange(0).second - factoredVocab_->getGroupRange(0).first);
+
+    std::vector<Expr> groupLosses(getNumFactorGroups());
+    for(int group = 0; group < getNumFactorGroups(); ++group) {
+      groupLosses[group] = logits_[group]->loss();
+    }
+
+    return addFactorMaxes(lemmaHasFactorGroupTensor, groupLosses, indices, factoredVocab_->getGroupRange(0).first, n);
   }
 
   Logits Logits::applyUnaryFunction(const std::function<Expr(Expr)>& f) const { // clone this but apply f to all loss values
@@ -282,9 +340,67 @@ namespace marian {
       };
 
       if (shortlist_ && !cachedShortWt_) { // shortlisted versions of parameters are cached within one batch, then clear()ed
-        cachedShortWt_  = index_select(Wt_, isLegacyUntransposedW ? -1 : 0, shortlist_->indices());
-        if(hasBias_)
-          cachedShortb_ = index_select(b_ ,                             -1, shortlist_->indices());
+#if COMPILE_CPU
+        // Shortlisting with intgemm. We either get float32 Wt_ or intgemm formatted Wt_ (in future implementation potentially)
+        // The two cases do exactly the same, with the difference that the first case is for 8bit integers and the second is for 16bit integers
+        Expr preparedBias = nullptr; //This is only necessary for the CPU codebase
+        if (graph_->getDeviceId().type == DeviceType::cpu) {
+          bool transposed = !isLegacyUntransposedW;
+          Expr aQuantMult = nullptr;
+          Expr bQuantMult = marian::cpu::integer::quantMult<Type::int8>(Wt_);
+          if (graph_->getBackend()->isInt8() || matchType<intgemm8>(Wt_->value_type())) {
+            if (isIntgemm(Wt_->value_type())) { // If we already have intgemm formatted matrix, just select columns from it. Intgemm equivalent of index_select
+              if (graph_->getBackend()->isPrecomputedAlpha() && graph_->getBackend()->isShifted()) {
+                aQuantMult = Expression<marian::cpu::integer::fetchAlphaFromModelNodeOp>(Wt_);
+                preparedBias = Expression<marian::cpu::integer::PrepareBiasForBNodeOp>(b_, Wt_, aQuantMult, bQuantMult);
+              }
+              cachedShortWt_ = marian::cpu::integer::selectColumnsB<Type::int8>(Wt_, shortlist_->indices(), -1000.0 /*clip_value currently unused */);
+            } else { // Else, convert the Wt_ matrix to intgemm format and then select vocabulary items from it.
+              cachedShortWt_ = marian::cpu::integer::prepareB<Type::int8>(Wt_, marian::cpu::integer::quantMult<Type::int8>(Wt_), -1000.0 /*clip_value currently unused */, transposed /*Use different routine as Wt is transposed*/);
+              if (graph_->getBackend()->isPrecomputedAlpha() && graph_->getBackend()->isShifted()) {
+                aQuantMult = Expression<marian::cpu::integer::fetchAlphaFromModelNodeOp>(cachedShortWt_);
+                preparedBias = Expression<marian::cpu::integer::PrepareBiasForBNodeOp>(b_, cachedShortWt_, aQuantMult, bQuantMult);
+              }
+              cachedShortWt_ = marian::cpu::integer::selectColumnsB<Type::int8>(cachedShortWt_, shortlist_->indices(), -1000.0 /*clip_value currently unused */);
+            }
+          } else if ((graph_->getBackend()->isInt16() || matchType<intgemm16>(Wt_->value_type()) )&& graph_->getDeviceId().type == DeviceType::cpu) {
+            if (isIntgemm(Wt_->value_type())) {
+              cachedShortWt_ = marian::cpu::integer::selectColumnsB<Type::int16>(Wt_, shortlist_->indices(), -1000.0 /*clip_value currently unused */);
+            } else {
+              cachedShortWt_ = marian::cpu::integer::prepareB<Type::int16>(Wt_, marian::cpu::integer::quantMult<Type::int16>(Wt_), -1000.0 /*clip_value currently unused */, transposed /*Use different routine as Wt is transposed*/);
+              cachedShortWt_ = marian::cpu::integer::selectColumnsB<Type::int16>(cachedShortWt_, shortlist_->indices(), -1000.0 /*clip_value currently unused */);
+            }
+          } else {
+            cachedShortWt_ = index_select(Wt_, isLegacyUntransposedW ? -1 : 0, shortlist_->indices());
+          }
+        }
+#endif
+#ifdef CUDA_FOUND
+        if (graph_->getBackend()->isInt8() && graph_->getDeviceId().type == DeviceType::gpu) { // GPU 8bit prepare and index_select
+          std::string nodeName = Wt_->name();
+          Expr BQuantMult = Expression<marian::gpu::integer::QuantMultNodeOp<marian::gpu::integer::Parameter> >(Wt_, nodeName);
+          // Prepare it by just quantizing. We do this py setting tensorcores to FALSE regardless of whether we use them or not.
+          // Even when we are using tensorcores, this matrix comes transposed so we don't care rearranging it in RowM format
+          // @TODO XapaJIaMnu this will fail for legacy models were isLegacyUntransposed = true. Fix it
+          Expr Wt_Quantized = Expression<marian::gpu::integer::PrepareNodeOp<marian::gpu::integer::Parameter> >(Wt_, BQuantMult);
+          cachedShortWt_ = index_select(Wt_Quantized, isLegacyUntransposedW ? -1 : 0, shortlist_->indices());
+          // We need to carry over the QuantizationMultiplier somehow. Create a new node here to do that
+          cachedShortWt_ = Expression<marian::gpu::integer::PreparedContainerNodeOp>(cachedShortWt_, BQuantMult);
+        } else if (graph_->getDeviceId().type == DeviceType::gpu) {
+          cachedShortWt_ = index_select(Wt_, isLegacyUntransposedW ? -1 : 0, shortlist_->indices());
+        }
+#endif
+        if(hasBias_) {
+#if COMPILE_CPU
+          if (preparedBias) {
+            cachedShortb_  = index_select(preparedBias ,                   -1, shortlist_->indices());
+          } else {
+            cachedShortb_  = index_select(b_ ,                             -1, shortlist_->indices());
+          }
+#else
+          cachedShortb_  = index_select(b_ ,                             -1, shortlist_->indices());
+#endif
+        }
       }
 
       if (factoredVocab_) {
@@ -435,7 +551,8 @@ namespace marian {
     }
   }
 
-  Embedding::Embedding(Ptr<ExpressionGraph> graph, Ptr<Options> options) : LayerBase(graph, options) {
+  Embedding::Embedding(Ptr<ExpressionGraph> graph, Ptr<Options> options) 
+    : LayerBase(graph, options), inference_(opt<bool>("inference")) {
     std::string name = opt<std::string>("prefix");
     int dimVoc = opt<int>("dimVocab");
     int dimEmb = opt<int>("dimEmb");
@@ -460,12 +577,18 @@ namespace marian {
     }
 
     E_ = graph_->param(name, {dimVoc, dimEmb}, initFunc, fixed);
+    if(E_->value_type() == Type::float16 && graph->isInference()) {
+      // During inference, we keep the embedding matrix as fp32 since csr_dot does not support fp16.
+      E_fp32_ = graph->constant(E_->shape(), inits::fromTensor(E_->val()), Type::float32);
+      E_fp32_->setMemoize(true);
+    }
   }
 
   // helper to embed a sequence of words (given as indices) via factored embeddings
   /*private*/ Expr Embedding::multiRows(const Words& data, float dropProb) const
   {
     auto graph = E_->graph();
+    Expr embedding = E_fp32_? E_fp32_ : E_; // Always uses a fp32 embedding matrix
     auto factoredData = factoredVocab_->csr_rows(data);
     // multi-hot factor vectors are represented as a sparse CSR matrix
     // [row index = word position index] -> set of factor indices for word at this position
@@ -478,7 +601,8 @@ namespace marian {
     // We apply it to the weights, i.e. factors get dropped out separately, but always as entire vectors.
     weights = dropout(weights, dropProb);
     // perform the product
-    return csr_dot(factoredData.shape, weights, indices, offsets, E_);
+    Expr wordEmb = csr_dot(factoredData.shape, weights, indices, offsets, embedding);
+    return E_fp32_? cast(wordEmb, Type::float16) : wordEmb;
   }
 
   std::tuple<Expr/*embeddings*/, Expr/*mask*/> Embedding::apply(Ptr<data::SubBatch> subBatch) const /*override final*/ {
@@ -516,10 +640,10 @@ namespace marian {
     //        - if it is required to be in a different range, the embeddings can still learn that, but more slowly
 
     auto batchEmbeddings = apply(subBatch->data(), {dimWidth, dimBatch, dimEmb});
-#if 0
+#if 1
     auto batchMask = graph->constant({dimWidth, dimBatch, 1},
                                      inits::fromVector(subBatch->mask()));
-#else
+#else // @TODO: this is dead code now, get rid of it
     // experimental: hide inline-fix source tokens from cross attention
     auto batchMask = graph->constant({dimWidth, dimBatch, 1},
                                      inits::fromVector(subBatch->crossMaskWithInlineFixSourceSuppressed()));
@@ -555,12 +679,13 @@ namespace marian {
   // standard encoder word embeddings
   /*private*/ Ptr<IEmbeddingLayer> EncoderDecoderLayerBase::createEmbeddingLayer() const {
     auto options = New<Options>(
-        "dimVocab", opt<std::vector<int>>("dim-vocabs")[batchIndex_],
-        "dimEmb",   opt<int>("dim-emb"),
-        "dropout",  dropout_,
-        "prefix",   (opt<bool>("tied-embeddings-src") || opt<bool>("tied-embeddings-all")) ? "Wemb" : prefix_ + "_Wemb",
-        "fixed",    embeddingFix_,
-        "vocab",    opt<std::vector<std::string>>("vocabs")[batchIndex_]); // for factored embeddings
+        "dimVocab",           opt<std::vector<int>>("dim-vocabs")[batchIndex_],
+        "dimEmb",             opt<int>("dim-emb"),
+        "dropout-embeddings", dropoutEmbeddings_,
+        "inference",          inference_,
+        "prefix",             (opt<bool>("tied-embeddings-src") || opt<bool>("tied-embeddings-all")) ? "Wemb" : prefix_ + "_Wemb",
+        "fixed",              embeddingFix_,
+        "vocab",              opt<std::vector<std::string>>("vocabs")[batchIndex_]); // for factored embeddings
     if(options_->hasAndNotEmpty("embedding-vectors")) {
       auto embFiles = opt<std::vector<std::string>>("embedding-vectors");
       options->set(
@@ -573,15 +698,16 @@ namespace marian {
   // ULR word embeddings
   /*private*/ Ptr<IEmbeddingLayer> EncoderDecoderLayerBase::createULREmbeddingLayer() const {
     return New<ULREmbedding>(graph_, New<Options>(
-        "dimSrcVoc",         opt<std::vector<int>>("dim-vocabs")[0],  // ULR multi-lingual src
-        "dimTgtVoc",         opt<std::vector<int>>("dim-vocabs")[1],  // ULR monon tgt
-        "dimUlrEmb",         opt<int>("ulr-dim-emb"),
-        "dimEmb",            opt<int>("dim-emb"),
-        "ulr-dropout",       opt<float>("ulr-dropout"),
-        "dropout",           dropout_,
-        "ulrTrainTransform", opt<bool>("ulr-trainable-transformation"),
-        "ulrQueryFile",      opt<std::string>("ulr-query-vectors"),
-        "ulrKeysFile",       opt<std::string>("ulr-keys-vectors")));
+        "dimSrcVoc",          opt<std::vector<int>>("dim-vocabs")[0],  // ULR multi-lingual src
+        "dimTgtVoc",          opt<std::vector<int>>("dim-vocabs")[1],  // ULR monon tgt
+        "dimUlrEmb",          opt<int>("ulr-dim-emb"),
+        "dimEmb",             opt<int>("dim-emb"),
+        "ulr-dropout",        opt<float>("ulr-dropout"),
+        "dropout-embeddings", dropoutEmbeddings_,
+        "inference",          inference_,
+        "ulrTrainTransform",  opt<bool>("ulr-trainable-transformation"),
+        "ulrQueryFile",       opt<std::string>("ulr-query-vectors"),
+        "ulrKeysFile",        opt<std::string>("ulr-keys-vectors")));
   }
 
   // get embedding layer for this encoder or decoder

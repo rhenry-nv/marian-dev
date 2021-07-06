@@ -1,3 +1,8 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include "common/definitions.h"
@@ -99,9 +104,12 @@ void Reduce(Functor functor, AggFunctor aggFunctor, float aggInit,
 }
 
 // clang-format off
+DISPATCH4(AddPosEmbeddings, marian::Tensor, const marian::Tensor&, float, int);
 DISPATCH7(Prod, marian::Tensor, const marian::Tensor&, const marian::Tensor&, bool, bool, float, float)
 DISPATCH8(ProdBatched, marian::Tensor, Ptr<Allocator>, const marian::Tensor, const marian::Tensor, bool, bool, float, float)
 DISPATCH9(CSRProd, marian::Tensor, Ptr<Allocator>, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, bool, bool, float)
+
+DISPATCH10(Affine, marian::Tensor, Ptr<Allocator>, const marian::Tensor&, const marian::Tensor&, const marian::Tensor&, bool, bool, float, float, bool)
 
 DISPATCH2(Softmax, marian::Tensor, marian::Tensor)
 DISPATCH3(SoftmaxGrad, marian::Tensor, marian::Tensor, marian::Tensor)
@@ -109,8 +117,8 @@ DISPATCH3(SoftmaxGrad, marian::Tensor, marian::Tensor, marian::Tensor)
 DISPATCH2(LogSoftmax, marian::Tensor, marian::Tensor)
 DISPATCH3(LogSoftmaxGrad, marian::Tensor, marian::Tensor, marian::Tensor)
 
-DISPATCH3(CrossEntropyPick, marian::Tensor, marian::Tensor, marian::Tensor)
-DISPATCH4(CrossEntropyPickBackward, marian::Tensor, marian::Tensor, marian::Tensor, marian::Tensor)
+DISPATCH4(CrossEntropyPick, marian::Tensor, marian::Tensor, marian::Tensor, float)
+DISPATCH5(CrossEntropyPickBackward, marian::Tensor, marian::Tensor, marian::Tensor, marian::Tensor, float)
 
 DISPATCH3(TransposeND, marian::Tensor, marian::Tensor, const std::vector<int>&)
 DISPATCH3(TransposeNDGrad, marian::Tensor, marian::Tensor, const std::vector<int>&)
@@ -119,6 +127,8 @@ DISPATCH5(Shift, marian::Tensor, marian::Tensor, marian::Shape, float, bool)
 DISPATCH4(ShiftGrad, marian::Tensor, marian::Tensor, marian::Shape, bool)
 
 DISPATCH3(Concatenate, marian::Tensor, const std::vector<marian::Tensor>&, int)
+
+DISPATCH7(AddFactorMaxes, marian::Tensor, Ptr<Allocator>, const marian::Tensor, const marian::Tensor, const std::vector<marian::Tensor>&, size_t, size_t)
 
 // clang-format on
 
@@ -164,6 +174,7 @@ static inline void Deconcatenate(std::vector<marian::Tensor>& outputs,
 
 // clang-format off
 DISPATCH5(LayerNormalization, marian::Tensor, marian::Tensor, marian::Tensor, marian::Tensor, float)
+DISPATCH7(AddBiasSkipAndLayerNormalization, marian::Tensor, marian::Tensor, marian::Tensor, marian::Tensor, marian::Tensor, marian::Tensor, float)
 
 #ifdef CUDA_FOUND
 namespace gpu {

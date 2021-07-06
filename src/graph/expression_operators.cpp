@@ -1,3 +1,8 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+ 
 #include "graph/expression_operators.h"
 #include "layers/constructors.h"
 
@@ -7,12 +12,14 @@
 #include "graph/node_operators_tuple.h"
 
 #include "graph/auto_tuner.h"
-#include "tensors/cpu/int16.h"
+#include "tensors/cpu/intgemm_interface.h"
 #include "tensors/cpu/fbgemm/expanded_gemm.h"
 
 #if USE_FBGEMM
 #include "fbgemm/Utils.h"
 #endif
+
+#include "tensors/gpu/integer_interface.h"
 
 namespace marian {
 
@@ -310,6 +317,20 @@ Expr atleast_4d(Expr a) {
   return atleast_nd(a, 4);
 }
 
+Expr addPosEmbedding(Expr embeddings, float scaleFactor, int startPos) {
+  int dimEmb   = embeddings->shape()[-1];
+  int dimWords = embeddings->shape()[-3];
+  auto graph = embeddings->graph();
+  if (!graph->isInference() || graph->getBackend()->getDeviceId().type == DeviceType::cpu) {
+    auto signal = graph->constant({dimWords, 1, dimEmb},
+                                   inits::sinusoidalPositionEmbeddings(startPos));
+    return scaleFactor * embeddings + signal;
+  }
+
+  // Mode is GPU inference
+  return Expression<PosEmbeddingNodeOp>(embeddings, scaleFactor, startPos);
+}
+
 Expr atleast_nd(Expr a, size_t dims) {
   if(a->shape().size() >= dims)
     return a;
@@ -474,14 +495,22 @@ Expr dot(Expr a, Expr b, bool transA, bool transB, float scale) {
   // Currently only true when command line options
   // --optimize --cpu-thread=N with N > 0 are set.
   if(device == DeviceType::cpu) {
-    if(isFloat(aElementType) && isFloat(bElementType)) {
-      if(a->graph()->getBackend()->isOptimized()) {
-        // dotInt16 computes A * B.T, hence the transpose for B to get A * B
-        // if transA = false and transB = false.
-
-        return cpu::int16::dot(
-          cpu::int16::quantize(transA ? transpose(a) : a, clipValue),
-          cpu::int16::quantize(transB ? b : transpose(b), clipValue),
+    if(isFloat(aElementType) && (isFloat(bElementType) || isIntgemm(bElementType))) {
+      if(a->graph()->getBackend()->isInt8() || matchType<intgemm8>(bElementType)) {
+        bool shiftedAll = a->graph()->getBackend()->isShiftedAll(); //@TODO
+        return cpu::integer::dot<Type::int8>(
+          a,
+          b,
+          transA,
+          transB,
+          scale,
+          shiftedAll);
+      } else if(a->graph()->getBackend()->isInt16() || matchType<intgemm16>(bElementType)) {
+        return cpu::integer::dot<Type::int16>(
+          a,
+          b,
+          transA,
+          transB,
           scale);
       } else {
         return Expression<DotNodeOp>(
@@ -512,13 +541,24 @@ Expr dot(Expr a, Expr b, bool transA, bool transB, float scale) {
       ABORT("Combination of types A: {} B: {} not supported", aElementType, bElementType);
     }
   } else {
-    return Expression<DotNodeOp>(
-        clip(a, clipValue), clip(b, clipValue), transA, transB, scale);
+    if(a->graph()->getBackend()->isInt8()) {
+      return gpu::integer::dot(clip(a, clipValue), clip(b, clipValue), transA, transB, scale);
+    } else {
+      return Expression<DotNodeOp>(
+          clip(a, clipValue), clip(b, clipValue), transA, transB, scale);
+    }
   }
 }
 
 Expr bdot(Expr a, Expr b, bool transA, bool transB, float scale) {
   return Expression<DotBatchedNodeOp>(a, b, transA, transB, scale);
+}
+
+// A fused version of affine for GPU inference
+static Expr affineFused(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale, bool do_relu) {
+  float clipValue = a->graph()->getBackend()->getClip();
+  std::vector<Expr> nodes = { clip(a, clipValue), clip(b, clipValue), bias};
+  return Expression<FusedAffineNodeOp>(nodes, transA, transB, scale, do_relu);
 }
 
 static Expr affineDefault(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale) {
@@ -542,7 +582,7 @@ static Expr affineDefault(Expr a, Expr b, Expr bias, bool transA, bool transB, f
 // youki/packed-model-pr-backup1031
 // https://machinetranslation.visualstudio.com/Marian/_git/marian-dev?version=GByouki%2Fpacked-model-pr-backup1031
 // SHA: 3456a7ed1d1608cfad74cd2c414e7e8fe141aa52
-Expr affine(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale) {
+Expr affine(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale, bool do_relu) {
   auto device = a->graph()->getDeviceId().type;
 
   float clipValue = a->graph()->getBackend()->getClip();
@@ -550,16 +590,30 @@ Expr affine(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale) {
   Type bElementType = b->value_type();
 
   if(device == DeviceType::cpu) {
-    if(isFloat(aElementType) && isFloat(bElementType)) {
-      if(a->graph()->getBackend()->isOptimized()) {
-        // cpu int16 version
-        return cpu::int16::affine(
-          cpu::int16::quantize(transA ? transpose(a) : a, clipValue),
-          cpu::int16::quantize(transB ? b : transpose(b), clipValue),
+    Expr affineTransform;
+    if(isFloat(aElementType) && (isFloat(bElementType) || isIntgemm(bElementType))) {
+      if(a->graph()->getBackend()->isInt8()  || matchType<intgemm8>(bElementType) ) {
+        bool shiftedBias = a->graph()->getBackend()->isShifted();
+        affineTransform = cpu::integer::affine<Type::int8>(
+          a,
+          b,
           bias,
-          scale);
+          transA,
+          transB,
+          scale,
+          clipValue,
+          shiftedBias);
+      } else if(a->graph()->getBackend()->isInt16()  || matchType<intgemm16>(bElementType) ) {
+        affineTransform = cpu::integer::affine<Type::int16>(
+          a,
+          b,
+          bias,
+          transA,
+          transB,
+          scale,
+          clipValue);
       } else {
-        return affineDefault(a, b, bias, transA, transB, scale);
+        affineTransform = affineDefault(a, b, bias, transA, transB, scale);
       }
     } else if(isFloat(aElementType) && isPacked(bElementType)) {
 #if USE_FBGEMM
@@ -570,13 +624,13 @@ Expr affine(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale) {
       // and this cpu lookup is executed only once and the state is kept in FBGEMM.
       if(fbgemm::fbgemmHasAvx2Support()) {
         // This variant of affine product can handle matrix multiplications with packed8 and packed16 weight matrix (B).
-        return cpu::variant::affine(clip(a, clipValue),
-                                    b,
-                                    b->shape(),
-                                    bias,
-                                    transA,
-                                    transB,
-                                    scale);
+        affineTransform = cpu::variant::affine(clip(a, clipValue),
+                                                b,
+                                                b->shape(),
+                                                bias,
+                                                transA,
+                                                transB,
+                                                scale);
       } else {
         ABORT("AVX2 is not available. At least, AVX2 is needed to use fbgemm-based packed GEMM");
       }
@@ -586,12 +640,26 @@ Expr affine(Expr a, Expr b, Expr bias, bool transA, bool transB, float scale) {
     } else {
       ABORT("Combination of types A: {} B: {} not supported", aElementType, bElementType);
     }
+    if(do_relu) 
+      return relu(affineTransform);
+    return affineTransform;
   } else {
+    Expr affineTransform;
     // Default GEMM
-    ABORT_IF(!isFloat(aElementType) || !isFloat(bElementType), 
-             "GPU-based GEMM only supports float types, you have A: {} and B: {}", 
+    if(a->graph()->getBackend()->isInt8()) {
+      return gpu::integer::affine(clip(a, clipValue), clip(b, clipValue),bias, transA, transB, scale, 0.0f /*unused clipvalue*/, do_relu);
+    } else {
+      ABORT_IF(!isFloat(aElementType) || !isFloat(bElementType),
+             "GPU-based GEMM only supports float types, you have A: {} and B: {}",
              aElementType, bElementType);
-    return affineDefault(a, b, bias, transA, transB, scale);
+      if(a->graph()->isInference()) {
+        return affineFused(a, b, bias, transA, transB, scale, do_relu);
+      }
+      affineTransform = affineDefault(a, b, bias, transA, transB, scale);
+    }
+    if (do_relu) 
+      return relu(affineTransform);
+    return affineTransform;
   }
 }
 
@@ -663,8 +731,8 @@ Expr cast(Expr a, Type type) {
   }
 }
 
-Expr cross_entropy(Expr logits, Expr indices) {
-  return Expression<CrossEntropyNodeOp>(logits, indices);
+Expr cross_entropy(Expr logits, Expr indices, float labelSmoothingAlpha, Type outputType) {
+  return Expression<CrossEntropyNodeOp>(logits, indices, labelSmoothingAlpha, outputType);
 }
 
 // Unlikelihood loss based on https://arxiv.org/abs/1908.04319
@@ -678,6 +746,20 @@ Expr unlikelihood(Expr logits, Expr indices) {
   // This is currently implemented with multiple ops, might be worth doing a special operation like for cross_entropy
   return -log(gather(1.f - softmax(logits), /*axis=*/-1, indicesWithLayout));
 }
+
+Expr addFactorMaxes(Expr lemmaHasFactorGroup, std::vector<Expr> groupLosses, Expr hypIndices, size_t groupStart, size_t numLemmas) {
+  if(groupLosses.size() == 1) {
+    return groupLosses[0];
+  }
+  std::vector<Expr> nodes({lemmaHasFactorGroup});
+  if (hypIndices) {
+    nodes.push_back(hypIndices);
+  }
+  nodes.insert(nodes.end(), groupLosses.begin(), groupLosses.end());
+  bool hasShortList = hypIndices != nullptr;
+  return Expression<AddFactorMaxesOp>(nodes, hasShortList, groupStart, numLemmas);
+}
+
 
 Expr plus(const std::vector<Expr>& nodes) {
   ABORT_IF(nodes.size() > 1, "Not implemented");
@@ -733,6 +815,20 @@ Expr layerNorm(Expr x,
   if(beta)
     nodes.push_back(beta);
   return Expression<LayerNormalizationOp>(nodes, eps);
+}
+
+Expr addBiasSkipAndLayerNorm(Expr x, Expr prevInput, Expr gamma, Expr beta, Expr bias, float eps) {
+  std::vector<Expr> nodes = {x, prevInput, gamma};
+  auto graph = x->graph();
+  if (graph->isInference() && graph->getBackend()->getDeviceId().type == DeviceType::gpu) {
+    return Expression<BiasAddSkipAndNormLayerOp>(nodes, bias, beta, eps);
+  }
+
+  if (bias) {
+    x = x + bias;
+  }
+  x = x + prevInput;
+  return layerNorm(x, gamma, beta, eps);
 }
 
 Expr highway(Expr y, Expr x, Expr t) {

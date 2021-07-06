@@ -1,5 +1,12 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
+#include "common/definitions.h"
+#include "graph/expression_operators.h"
 #include "marian.h"
 
 #include "data/shortlist.h"
@@ -68,18 +75,21 @@ class EncoderDecoderLayerBase : public LayerBase {
 protected:
   const std::string prefix_;
   const bool embeddingFix_;
-  const float dropout_;
+  const float dropoutEmbeddings_; // this drops out full embedding vectors 
   const bool inference_;
   const size_t batchIndex_;
   mutable std::vector<Ptr<IEmbeddingLayer>> embeddingLayers_; // (lazily created)
 
-  EncoderDecoderLayerBase(Ptr<ExpressionGraph> graph, Ptr<Options> options, const std::string& prefix, size_t batchIndex,
-        float dropout,
-        bool embeddingFix) :
+  EncoderDecoderLayerBase(Ptr<ExpressionGraph> graph, 
+                          Ptr<Options> options, 
+                          const std::string& prefix, 
+                          size_t batchIndex,
+                          float dropoutEmbeddings,
+                          bool embeddingFix) :
       LayerBase(graph, options),
       prefix_(options->get<std::string>("prefix", prefix)),
       embeddingFix_(embeddingFix),
-      dropout_(dropout),
+      dropoutEmbeddings_(dropoutEmbeddings),
       inference_(options->get<bool>("inference", false)),
       batchIndex_(options->get<size_t>("index", batchIndex)) {}
 
@@ -139,6 +149,7 @@ private:
     template<typename T> Expr constant(const std::vector<T>& data) const { return constant(Shape{(int)data.size()}, data); } // same as constant() but assuming vector
     Expr indices(const std::vector<uint32_t>& data) const { return graph()->indices(data); } // actually the same as constant(data) for this data type
     std::vector<float> getFactorMasks(size_t factorGroup, const std::vector<WordIndex>& indices) const;
+    Expr addFactorMaxesHelper(Expr indices=nullptr) const;
 private:
     // members
     // @TODO: we don't use the RationalLoss component anymore, can be removed again, and replaced just by the Expr
@@ -298,8 +309,11 @@ public:
 // EncoderDecoderLayerBase, which knows to pass on all required parameters from options.
 class Embedding : public LayerBase, public IEmbeddingLayer {
   Expr E_;
+  Expr E_fp32_; // Keep this around so that multi-row can work with fp16 params
   Ptr<FactoredVocab> factoredVocab_;
   Expr multiRows(const Words& data, float dropProb) const;
+  bool inference_{false};
+
 public:
   Embedding(Ptr<ExpressionGraph> graph, Ptr<Options> options);
 
@@ -312,8 +326,11 @@ public:
 
 class ULREmbedding : public LayerBase, public IEmbeddingLayer {
   std::vector<Expr> ulrEmbeddings_; // @TODO: These could now better be written as 6 named class members
+  bool inference_{false};
+
 public:
-  ULREmbedding(Ptr<ExpressionGraph> graph, Ptr<Options> options) : LayerBase(graph, options) {
+  ULREmbedding(Ptr<ExpressionGraph> graph, Ptr<Options> options) 
+    : LayerBase(graph, options), inference_(opt<bool>("inference")) {
     std::string name = "url_embed"; //opt<std::string>("prefix");
     int dimKeys = opt<int>("dimTgtVoc");
     int dimQueries = opt<int>("dimSrcVoc");
@@ -399,7 +416,9 @@ public:
     qt = qt/sqrtDim;  // normalize accordin to embed size to avoid dot prodcut growing large in magnitude with larger embeds sizes
     auto z = dot(qt, keyEmbed, false, true);      // query-key similarity
     float dropProb = this->options_->get<float>("ulr-dropout", 0.0f);  // default no dropout
-    z = dropout(z, dropProb);
+    if(!inference_)
+      z = dropout(z, dropProb);
+
     float tau = this->options_->get<float>("ulr-softmax-temperature", 1.0f);  // default no temperature
     // temperature in softmax is to control randomness of predictions
     // high temperature Softmax outputs are more close to each other
@@ -411,7 +430,8 @@ public:
     auto graph = ulrEmbeddings_.front()->graph();
     auto batchMask = graph->constant({ dimWords, dimBatch, 1 },
                                      inits::fromVector(subBatch->mask()));
-    batchEmbeddings = dropout(batchEmbeddings, options_->get<float>("dropout", 0.0f), {batchEmbeddings->shape()[-3], 1, 1});
+    if(!inference_)
+      batchEmbeddings = dropout(batchEmbeddings, options_->get<float>("dropout-embeddings", 0.0f), {batchEmbeddings->shape()[-3], 1, 1});
     return std::make_tuple(batchEmbeddings, batchMask);
   }
 
@@ -440,6 +460,18 @@ Expr denseInline(Expr x, std::string prefix, std::string suffix, int outDim, con
   x = affine(x, W, b);
   if (actFn)
     x = actFn(x);
+  x = dropout(x, dropProb); // @TODO: check for infernce?
+  return x;
+}
+
+static inline
+Expr denseInlineRelu(Expr x, std::string prefix, std::string suffix, int outDim, float dropProb = 0.0f)
+{
+  auto graph = x->graph();
+
+  auto W = graph->param(prefix + "_W" + suffix, { x->shape()[-1], outDim }, inits::glorotUniform());
+  auto b = graph->param(prefix + "_b" + suffix, { 1,              outDim }, inits::zeros());
+  x = affine(x, W, b, false, false, 1.f, true);
   x = dropout(x, dropProb);
   return x;
 }
@@ -450,6 +482,14 @@ Expr layerNorm(Expr x, std::string prefix, std::string suffix = std::string()) {
   auto scale = x->graph()->param(prefix + "_ln_scale" + suffix, { 1, dimModel }, inits::ones());
   auto bias  = x->graph()->param(prefix + "_ln_bias"  + suffix, { 1, dimModel }, inits::zeros());
   return marian::layerNorm(x, scale, bias, 1e-6f);
+}
+
+static inline
+Expr addBiasSkipAndLayerNorm(Expr x, std::string prefix, Expr prevInput, Expr bias = nullptr, std::string suffix = std::string()) {
+  int dimModel = x->shape()[-1];
+  auto scale = x->graph()->param(prefix + "_ln_scale" + suffix, { 1, dimModel }, inits::ones());
+  auto beta  = x->graph()->param(prefix + "_ln_bias"  + suffix, { 1, dimModel }, inits::zeros());
+  return marian::addBiasSkipAndLayerNorm(x, prevInput, scale, beta, bias, 1e-6f);
 }
 
 }  // namespace marian

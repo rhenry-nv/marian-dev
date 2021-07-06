@@ -1,3 +1,8 @@
+/* All or part of this file was contributed by NVIDIA under license:
+ *   Copyright (C) 2020 NVIDIA Corporation
+ *   SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include <thread>
@@ -380,6 +385,98 @@ public:
 
 };
 
+class FusedAffineNodeOp : public NaryNodeOp {
+private:
+  friend class SerializationHelpers;
+  bool transA_;
+  bool transB_;
+  float scalar_;
+  bool do_relu_;
+
+public:
+  FusedAffineNodeOp(const std::vector<Expr>& nodes,
+               bool transA,
+               bool transB,
+               float scalar,
+               bool do_relu=false)
+      : NaryNodeOp(nodes, newShape(nodes[0], nodes[1], transA, transB)),
+        transA_(transA),
+        transB_(transB),
+        scalar_(scalar),
+        do_relu_(do_relu) {}
+
+  Shape newShape(Expr a, Expr b, bool transA, bool transB) {
+    auto shapeA = a->shape();
+    if(transA) {
+      shapeA.set(shapeA.size() - 2, a->shape()[shapeA.size() - 1]);
+      shapeA.set(shapeA.size() - 1, a->shape()[shapeA.size() - 2]);
+    }
+
+    auto shapeB = b->shape();
+    if(transB) {
+      shapeB.set(shapeB.size() - 2, b->shape()[shapeB.size() - 1]);
+      shapeB.set(shapeB.size() - 1, b->shape()[shapeB.size() - 2]);
+    }
+
+    Shape outShape = shapeA;
+    outShape.set(outShape.size() - 1, shapeB[shapeB.size() - 1]);
+    ABORT_IF(shapeA[shapeA.size() - 1] != shapeB[shapeB.size() - 2],
+             "Matrix product requires inner dimensions to match in {}{} * {}{}", std::string(shapeA), transA, std::string(shapeB), transB);
+    return outShape;
+  }
+
+  NodeOps forwardOps() override {
+    using namespace functional;
+
+    return {
+      NodeOp(
+        Affine(val_,
+               graph()->allocator(),
+               child(0)->val(),
+               child(1)->val(),
+               child(2)->val(),
+               transA_,
+               transB_,
+               0.f,
+               scalar_,
+               do_relu_))
+    };
+  }
+
+  NodeOps backwardOps() override {
+    ABORT("Node only supports inference.");
+  }
+
+  const std::string type() override { return "fusedAffine"; }
+
+  virtual size_t hash() override {
+    size_t seed = NaryNodeOp::hash();
+    util::hash_combine(seed, transA_);
+    util::hash_combine(seed, transB_);
+    util::hash_combine(seed, scalar_);
+    util::hash_combine(seed, do_relu_);
+    return seed;
+  }
+
+  virtual bool equal(Expr node) override {
+    if(!NaryNodeOp::equal(node))
+      return false;
+    auto cnode = std::dynamic_pointer_cast<FusedAffineNodeOp>(node);
+    if(!cnode)
+      return false;
+    if(transA_ != cnode->transA_)
+      return false;
+    if(transB_ != cnode->transB_)
+      return false;
+    if(scalar_ != cnode->scalar_)
+      return false;
+    if(do_relu_ != cnode->do_relu_)
+      return false;
+    return true;
+  }
+
+};
+
 class DotBatchedNodeOp : public NaryNodeOp {
 private:
   friend class SerializationHelpers;
@@ -660,6 +757,54 @@ struct ScalarProductNodeOp : public NaryNodeOp {
   }
 
   int axis_;
+};
+
+struct PosEmbeddingNodeOp : public NaryNodeOp {
+  PosEmbeddingNodeOp(Expr embeddings, float scaleFactor, int startPos)
+      : NaryNodeOp({embeddings}, newShape(embeddings)), 
+        scaleFactor_(scaleFactor),
+        startPos_(startPos) {}
+
+  Shape newShape(Expr a) {
+    return a->shape();
+  }
+
+  NodeOps forwardOps() override {
+    using namespace functional;
+
+    return {NodeOp(AddPosEmbeddings(val_, child(0)->val(), scaleFactor_, startPos_))};
+  }
+
+  NodeOps backwardOps() override {
+    ABORT("Not Implemented. Inference Optimization");
+  }
+
+  const std::string type() override { return "Add Positional Embedding"; }
+
+  const std::string color() override { return "blue"; }
+
+  virtual size_t hash() override {
+    size_t seed = NaryNodeOp::hash();
+    util::hash_combine(seed, scaleFactor_);
+    util::hash_combine(seed, startPos_);
+    return seed;
+  }
+
+  virtual bool equal(Expr node) override {
+    if(!NaryNodeOp::equal(node))
+      return false;
+    auto cnode = std::dynamic_pointer_cast<PosEmbeddingNodeOp>(node);
+    if(!cnode)
+      return false;
+    if(scaleFactor_ != cnode->scaleFactor_)
+      return false;
+    if(startPos_ != cnode->startPos_)
+      return false;
+    return true;
+  }
+
+  float scaleFactor_;
+  int startPos_;
 };
 
 struct RowsNodeOp : public NaryNodeOp {
@@ -1072,9 +1217,14 @@ private:
 // For each vocabulary item v, the only non-zero element in a row in the sum is the item
 // that matches the label indexed by i (the picked element).
 // C = sum_{v in V}(-logsoftmax(A) * delta(v, i) = -logsoftmax(A)[i]
-struct CrossEntropyNodeOp : public NaryNodeOp {
-  CrossEntropyNodeOp(Expr a, Expr indices)
-    : NaryNodeOp({a, indices}, newShape(a), a->value_type()) {
+class CrossEntropyNodeOp : public NaryNodeOp {
+private:
+  float labelSmoothingAlpha_;
+
+public:
+  CrossEntropyNodeOp(Expr a, Expr indices, float labelSmoothingAlpha, Type outputType = Type::float32)
+    : NaryNodeOp({a, indices}, newShape(a), outputType),
+      labelSmoothingAlpha_(labelSmoothingAlpha) {
     matchOrAbort<IndexType>(indices->value_type());
     int rows   = a->shape().elements() / a->shape()[-1];
     int labels = indices->shape().elements();
@@ -1088,12 +1238,29 @@ struct CrossEntropyNodeOp : public NaryNodeOp {
   }
 
   NodeOps forwardOps() override {
-    return {NodeOp(CrossEntropyPick(val_, child(0)->val(), child(1)->val()))};
+    return {NodeOp(CrossEntropyPick(val_, child(0)->val(), child(1)->val(), labelSmoothingAlpha_))};
   }
 
   NodeOps backwardOps() override {
     return {NodeOp(CrossEntropyPickBackward(
-        child(0)->grad(), adj_, child(0)->val(), child(1)->val()))};
+        child(0)->grad(), adj_, child(0)->val(), child(1)->val(), labelSmoothingAlpha_))};
+  }
+
+  virtual size_t hash() override {
+    size_t seed = NaryNodeOp::hash();
+    util::hash_combine(seed, labelSmoothingAlpha_);
+    return seed;
+  }
+
+  virtual bool equal(Expr node) override {
+    if(!NaryNodeOp::equal(node))
+      return false;
+    auto cnode = std::dynamic_pointer_cast<CrossEntropyNodeOp>(node);
+    if(!cnode)
+      return false;
+    if(labelSmoothingAlpha_ != cnode->labelSmoothingAlpha_)
+      return false;
+    return true;
   }
 
   const std::string type() override { return "x-ent"; }
@@ -1221,6 +1388,122 @@ public:
 private:
   friend class SerializationHelpers; // @TODO: use the same name for this as SqrtNodeOp
   float eps_;
+};
+
+struct BiasAddSkipAndNormLayerOp : public NaryNodeOp {
+Expr bias_;
+Expr beta_;
+public:
+  BiasAddSkipAndNormLayerOp(const std::vector<Expr>& nodes, Expr bias, Expr beta, float eps = 1e-9)
+      : NaryNodeOp(nodes), eps_(eps) {
+    // @TODO: dimension check
+    bias_ = bias;
+    beta_ = beta;
+  }
+
+  NodeOps forwardOps() override {
+    return {NodeOp(
+        AddBiasSkipAndLayerNormalization(val_,
+                                         child(0)->val(),
+                                         bias_? bias_->val() : nullptr,
+                                         child(1)->val(),
+                                         child(2)->val(),
+                                         beta_? beta_->val() : nullptr,
+                                         eps_))};
+  }
+
+  NodeOps backwardOps() override {
+    ABORT("Not Implemented for Training");
+  }
+
+  const std::string type() override { return "biasAddThenSkipConnectionThenLayerNorm"; }
+
+  virtual size_t hash() override {
+    size_t seed = NaryNodeOp::hash();
+    util::hash_combine(seed, eps_);
+    return seed;
+  }
+
+  virtual bool equal(Expr node) override {
+    if(!NaryNodeOp::equal(node))
+      return false;
+    auto cnode = std::dynamic_pointer_cast<BiasAddSkipAndNormLayerOp>(node);
+    if(!cnode)
+      return false;
+    if(eps_ != cnode->eps_)
+      return false;
+    return true;
+  }
+
+private:
+  friend class SerializationHelpers; // @TODO: use the same name for this as SqrtNodeOp
+  float eps_;
+};
+
+struct AddFactorMaxesOp : public NaryNodeOp {
+size_t groupStart_;
+size_t numLemmas_;
+bool hasShortlist_;
+public:
+  AddFactorMaxesOp(const std::vector<Expr>& nodes, bool hasShortlist, size_t groupStart, size_t numLemmas)
+      : NaryNodeOp(nodes, getShape(nodes, hasShortlist), commonType(std::vector<Expr>(nodes.begin() + 1, nodes.end())) ) {
+    groupStart_ = groupStart;
+    numLemmas_ = hasShortlist? nodes[1]->shape().size(): numLemmas;
+    hasShortlist_ = hasShortlist;
+  }
+
+  Shape getShape(const std::vector<Expr>& nodes, bool hasShortlist) {
+    ABORT_IF(nodes.empty(), "No child nodes given");
+    int start = hasShortlist? 2 : 1;
+    return nodes[start]->shape();
+  }
+
+  NodeOps forwardOps() override {
+    int start = hasShortlist_? 2 : 1;
+    std::vector<Tensor> losses;
+    for(int i = start; i < children().size(); ++i) {
+      losses.push_back(child(i)->val());
+    }
+    return {NodeOp(
+                    AddFactorMaxes(val_,
+                                   graph()->allocator(),
+                                   child(0)->val(), // lemmaHasFactorGroupTensor
+                                   hasShortlist_? child(1)->val() : nullptr, // indices
+                                   losses,
+                                   groupStart_, numLemmas_))};
+  }
+
+  NodeOps backwardOps() override {
+    ABORT("Not Implemented for Training");
+  }
+
+  const std::string type() override { return "AddFactorMaxesOp"; }
+
+  virtual size_t hash() override {
+    size_t seed = NaryNodeOp::hash();
+    util::hash_combine(seed, hasShortlist_);
+    util::hash_combine(seed, groupStart_);
+    util::hash_combine(seed, numLemmas_);
+    return seed;
+  }
+
+  virtual bool equal(Expr node) override {
+    if(!NaryNodeOp::equal(node))
+      return false;
+    auto cnode = std::dynamic_pointer_cast<AddFactorMaxesOp>(node);
+    if(!cnode)
+      return false;
+    if(hasShortlist_ != cnode->hasShortlist_)
+      return false;
+    if(groupStart_ != cnode->groupStart_)
+      return false;
+    if(numLemmas_ != cnode->numLemmas_)
+      return false;
+    return true;
+  }
+
+private:
+  friend class SerializationHelpers; // @TODO: use the same name for this as SqrtNodeOp
 };
 
 struct HighwayNodeOp : public NaryNodeOp {
