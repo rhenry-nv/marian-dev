@@ -346,10 +346,12 @@ public:
     trgVocab_ = New<Vocab>(options_, vocabPaths.size() - 1);
     trgVocab_->load(vocabPaths.back());
 
+    auto corpus = New<data::Corpus>(options_, true);
+    auto srcVocab = corpus->getVocabs()[0];
+    
     // load lexical shortlist
     if(options_->hasAndNotEmpty("shortlist"))
-      shortlistGenerator_ = New<data::LexicalShortlistGenerator>(
-          options_, srcVocabs_.front(), trgVocab_, 0, 1, vocabPaths.front() == vocabPaths.back());
+      shortlistGenerator_ = data::createShortlistGenerator(options_, srcVocab, trgVocab_, 0, 1, vocabPaths.front() == vocabPaths.back());
 
     // get device IDs
     auto devices = Config::getDevices(options_);
